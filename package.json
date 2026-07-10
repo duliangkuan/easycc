@@ -1,11 +1,12 @@
 {
   "name": "fy-desktop",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "风云AI工具站 桌面版",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder --win nsis",
+    "dist:full": "electron-builder --win nsis --config.extraResources=cli-bundle --config.nsis.artifactName=EasyCC-Full-Setup-${version}.exe"
   },
   "author": "风云",
   "devDependencies": {

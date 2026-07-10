@@ -121,8 +121,18 @@ function sendProgress(payload) {
  * claude：单文件 claude.exe。codex：codex.tar.gz 解压到 codex/（Windows 自带 tar）。
  * 返回可执行文件的完整路径。
  */
+// 完整版把二进制打进了 resources/cli-bundle/，优先用它（零下载）
+function bundledPath(tool) {
+  const base = path.join(process.resourcesPath, "cli-bundle");
+  return tool === "cc"
+    ? path.join(base, "claude.exe")
+    : path.join(base, "codex", "bin", "codex.exe");
+}
+
 async function ensureBinary(tool) {
   fs.mkdirSync(binDir(), { recursive: true });
+  const bundled = bundledPath(tool);
+  if (fs.existsSync(bundled)) return bundled; // 完整版：包内自带，不下载
   if (tool === "cc") {
     const exe = path.join(binDir(), "claude.exe");
     if (fs.existsSync(exe)) return exe;
@@ -167,14 +177,28 @@ async function launchCli(tool) {
     return { ok: false, error: `下载 ${tool === "codex" ? "Codex" : "Claude Code"} 失败：${e.message}` };
   }
 
-  let inner;
-  if (tool === "codex") {
-    inner = `set FY_API_KEY=${cfg.apiKey}&& "${exe}"`;
-  } else {
-    inner = `set ANTHROPIC_BASE_URL=${cfg.baseUrl}&& set ANTHROPIC_AUTH_TOKEN=${cfg.apiKey}&& "${exe}"`;
-  }
+  // 写一个 .bat 启动脚本，绕开「中文安装路径 + 引号嵌套」把命令拼坏的问题。
+  // bat 放 ASCII 临时目录（用户名是 ASCII）；内部 chcp 65001 让 cmd 正确识别中文 exe 路径。
   const title = tool === "codex" ? "Codex" : "Claude Code";
-  spawn("cmd.exe", ["/c", "start", title, "cmd", "/k", inner], {
+  const envLines =
+    tool === "codex"
+      ? [`set "FY_API_KEY=${cfg.apiKey}"`]
+      : [
+          `set "ANTHROPIC_BASE_URL=${cfg.baseUrl}"`,
+          `set "ANTHROPIC_AUTH_TOKEN=${cfg.apiKey}"`,
+        ];
+  // chcp 65001 必须在第一行（切 UTF-8 后，后面的中文 exe 路径才被正确读取）；不要加 BOM
+  const bat = [
+    "@chcp 65001 >nul",
+    "@echo off",
+    `title ${title}`,
+    ...envLines,
+    `"${exe}"`,
+    "",
+  ].join("\r\n");
+  const batPath = path.join(require("os").tmpdir(), `fy-launch-${tool}.bat`);
+  fs.writeFileSync(batPath, bat, "utf8");
+  spawn("cmd.exe", ["/c", "start", title, "cmd", "/k", batPath], {
     detached: true,
     shell: false,
     windowsHide: false,
