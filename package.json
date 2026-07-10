@@ -1,6 +1,6 @@
 {
   "name": "fy-desktop",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "风云AI工具站 桌面版",
   "main": "main.js",
   "scripts": {
@@ -36,6 +36,8 @@
       "createDesktopShortcut": true,
       "shortcutName": "风云AI工具站",
       "artifactName": "EasyCC-Setup-${version}.exe"
-    }
+    },
+    "compression": "maximum",
+    "afterPack": "./afterPack.js"
   }
 }

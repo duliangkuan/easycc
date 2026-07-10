@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld("fy", {
   getConfig: () => ipcRenderer.invoke("get-config"),
   saveConfig: (cfg) => ipcRenderer.invoke("save-config", cfg),
   goConsole: () => ipcRenderer.invoke("go-console"),
+  onProgress: (cb) => ipcRenderer.on("cli-progress", (_e, payload) => cb(payload)),
 });
