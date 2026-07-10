@@ -34,7 +34,8 @@
       "allowToChangeInstallationDirectory": true,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "shortcutName": "风云AI工具站"
+      "shortcutName": "风云AI工具站",
+      "artifactName": "EasyCC-Setup-${version}.exe"
     }
   }
 }
