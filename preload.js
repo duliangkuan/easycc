@@ -4,6 +4,10 @@ contextBridge.exposeInMainWorld("fy", {
   launch: (tool) => ipcRenderer.invoke("launch", tool),
   getConfig: () => ipcRenderer.invoke("get-config"),
   saveConfig: (cfg) => ipcRenderer.invoke("save-config", cfg),
-  goConsole: () => ipcRenderer.invoke("go-console"),
+  setTab: (tab) => ipcRenderer.invoke("set-tab", tab),
+  winCtl: (action) => ipcRenderer.invoke("win-ctl", action),
+  ping: (baseUrl) => ipcRenderer.invoke("ping", baseUrl),
+  binStatus: () => ipcRenderer.invoke("bin-status"),
+  version: () => ipcRenderer.invoke("app-version"),
   onProgress: (cb) => ipcRenderer.on("cli-progress", (_e, payload) => cb(payload)),
 });

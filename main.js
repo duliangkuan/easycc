@@ -1,6 +1,7 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, Menu, shell } = require("electron");
 const { spawn, execFileSync } = require("child_process");
 const https = require("https");
+const http = require("http");
 const path = require("path");
 const fs = require("fs");
 
@@ -11,7 +12,14 @@ const BIN_SOURCES = [
   "https://api.dufengyun.xyz/download",
   "https://github.com/duliangkuan/fy-desktop/releases/download/binaries",
 ];
-const TOOLBAR_H = 56;
+// 与 renderer/ui.css 的布局常量保持一致
+const TITLEBAR_H = 40;
+const SIDEBAR_W = 216;
+// 内嵌网站页签 → 目标 URL
+const SITE_TABS = {
+  console: `${SITE_URL}/console/keys`,
+  learn: `${SITE_URL}/learn`,
+};
 
 const configPath = () => path.join(app.getPath("userData"), "config.json");
 const binDir = () => path.join(app.getPath("userData"), "bin");
@@ -20,7 +28,7 @@ function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(configPath(), "utf-8"));
   } catch {
-    return { apiKey: "", baseUrl: "https://api.dufengyun.xyz" };
+    return { apiKey: "", baseUrl: "https://api.dufengyun.xyz", theme: "light" };
   }
 }
 function saveConfig(cfg) {
@@ -28,31 +36,53 @@ function saveConfig(cfg) {
 }
 
 let win, siteView;
+let activeSiteTab = null; // 当前显示的网站页签（console/learn），原生页签时为 null
+
+function layoutSiteView() {
+  if (!win || !siteView) return;
+  const { width, height } = win.getContentBounds();
+  if (activeSiteTab) {
+    siteView.setBounds({
+      x: SIDEBAR_W,
+      y: TITLEBAR_H,
+      width: width - SIDEBAR_W,
+      height: height - TITLEBAR_H,
+    });
+  } else {
+    // 原生页签：把视图移出可视区（setVisible 在部分版本闪烁，挪走最稳）
+    siteView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  }
+}
 
 function createWindow() {
+  const cfg = loadConfig();
   win = new BrowserWindow({
     width: 1180,
     height: 820,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: 940,
+    minHeight: 620,
     title: "风云AI工具站",
-    backgroundColor: "#faf8f5",
-    webPreferences: { preload: path.join(__dirname, "preload.js") },
+    frame: false,
+    backgroundColor: cfg.theme === "dark" ? "#211f1c" : "#efeeeb",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      // FY_SHOT 自检：后台跑时不节流，否则切页后不重绘、截图全是旧帧
+      backgroundThrottling: !process.env.FY_SHOT,
+    },
   });
-  win.loadFile("toolbar.html");
+  win.loadFile(path.join(__dirname, "renderer", "index.html"));
 
-  siteView = new WebContentsView();
+  siteView = new WebContentsView({ webPreferences: { partition: "persist:site" } });
   win.contentView.addChildView(siteView);
-  const ua = siteView.webContents.getUserAgent() + " FYDesktop/1.0";
+  const ua = siteView.webContents.getUserAgent() + " FYDesktop/2.0";
   siteView.webContents.setUserAgent(ua);
-  siteView.webContents.loadURL(SITE_URL);
+  // 预热首个网站页签，切过去即显示
+  siteView.webContents.loadURL(SITE_TABS.console);
 
-  const layout = () => {
-    const { width, height } = win.getContentBounds();
-    siteView.setBounds({ x: 0, y: TOOLBAR_H, width, height: height - TOOLBAR_H });
-  };
-  layout();
-  win.on("resize", layout);
+  layoutSiteView();
+  win.on("resize", layoutSiteView);
+  win.on("maximize", layoutSiteView);
+  win.on("unmaximize", layoutSiteView);
   siteView.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
@@ -128,13 +158,18 @@ function bundledPath(tool) {
     ? path.join(base, "claude.exe")
     : path.join(base, "codex", "bin", "codex.exe");
 }
+function downloadedPath(tool) {
+  return tool === "cc"
+    ? path.join(binDir(), "claude.exe")
+    : path.join(binDir(), "codex", "bin", "codex.exe");
+}
 
 async function ensureBinary(tool) {
   fs.mkdirSync(binDir(), { recursive: true });
   const bundled = bundledPath(tool);
   if (fs.existsSync(bundled)) return bundled; // 完整版：包内自带，不下载
   if (tool === "cc") {
-    const exe = path.join(binDir(), "claude.exe");
+    const exe = downloadedPath("cc");
     if (fs.existsSync(exe)) return exe;
     sendProgress({ tool, phase: "start", label: "Claude Code" });
     await downloadWithFallback("claude.exe", exe, (p, got, total) =>
@@ -145,7 +180,7 @@ async function ensureBinary(tool) {
   }
   // codex（包内可执行在 bin/codex.exe）
   const codexDir = path.join(binDir(), "codex");
-  const exe = path.join(codexDir, "bin", "codex.exe");
+  const exe = downloadedPath("codex");
   if (fs.existsSync(exe)) return exe;
   const tgz = path.join(binDir(), "codex.tar.gz");
   sendProgress({ tool, phase: "start", label: "Codex" });
@@ -165,7 +200,7 @@ async function ensureBinary(tool) {
 async function launchCli(tool) {
   const cfg = loadConfig();
   if (!cfg.apiKey)
-    return { ok: false, error: "请先在右上角「设置」填入你的专属 API Key（在控制台→我的 API Key 获取）" };
+    return { ok: false, error: "请先在「设置」填入你的专属 API Key（在控制台→我的 API Key 获取）" };
   if (process.platform !== "win32")
     return { ok: false, error: "当前版本仅支持 Windows 启动 CLI" };
 
@@ -206,18 +241,94 @@ async function launchCli(tool) {
   return { ok: true };
 }
 
+// ── 网关连通性：GET baseUrl，量往返毫秒 ──
+function pingGateway(baseUrl) {
+  return new Promise((resolve) => {
+    let url;
+    try {
+      url = new URL(baseUrl);
+    } catch {
+      return resolve({ ok: false, error: "地址格式不对" });
+    }
+    const mod = url.protocol === "http:" ? http : https;
+    const t0 = Date.now();
+    const req = mod.get(url, (res) => {
+      res.resume(); // 只要握上手就算通，状态码不论
+      resolve({ ok: true, ms: Date.now() - t0, status: res.statusCode });
+    });
+    req.setTimeout(5000, () => {
+      req.destroy();
+      resolve({ ok: false, error: "超时（5s）" });
+    });
+    req.on("error", (e) => resolve({ ok: false, error: e.message }));
+  });
+}
+
+// ── IPC ──
 ipcMain.handle("launch", (_e, tool) => launchCli(tool));
 ipcMain.handle("get-config", () => loadConfig());
 ipcMain.handle("save-config", (_e, cfg) => {
   saveConfig(cfg);
   return { ok: true };
 });
-ipcMain.handle("go-console", () => {
-  if (siteView) siteView.webContents.loadURL(`${SITE_URL}/console/keys`);
+ipcMain.handle("app-version", () => app.getVersion());
+ipcMain.handle("ping", (_e, baseUrl) => pingGateway(baseUrl));
+
+ipcMain.handle("bin-status", () => {
+  const st = {};
+  for (const tool of ["cc", "codex"]) {
+    const bundled = fs.existsSync(bundledPath(tool));
+    st[tool] = { ready: bundled || fs.existsSync(downloadedPath(tool)), bundled };
+  }
+  return st;
+});
+
+ipcMain.handle("set-tab", (_e, tab) => {
+  const wasSiteTab = activeSiteTab;
+  activeSiteTab = SITE_TABS[tab] ? tab : null;
+  // 换到另一个网站页签才重新导航；同页签来回切保留浏览状态
+  if (activeSiteTab && activeSiteTab !== wasSiteTab) {
+    siteView.webContents.loadURL(SITE_TABS[activeSiteTab]);
+  }
+  layoutSiteView();
+});
+
+ipcMain.handle("win-ctl", (_e, action) => {
+  if (!win) return;
+  if (action === "minimize") win.minimize();
+  else if (action === "maximize") (win.isMaximized() ? win.unmaximize() : win.maximize());
+  else if (action === "close") win.close();
 });
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();
+
+  // UI 自检截图：FY_SHOT=1 npm start → 存 launch/settings 两页 png 后退出
+  if (process.env.FY_SHOT) {
+    const shotDir = process.env.FY_SHOT_DIR || app.getPath("temp");
+    win.webContents.once("did-finish-load", async () => {
+      const snap = async (name) => {
+        win.webContents.invalidate(); // 强制重绘再截，避免拿到旧合成帧
+        await new Promise((r) => setTimeout(r, 300));
+        const img = await win.webContents.capturePage();
+        fs.writeFileSync(path.join(shotDir, `fy-${name}.png`), img.toPNG());
+      };
+      await new Promise((r) => setTimeout(r, 1200));
+      await snap("launch");
+      await win.webContents.executeJavaScript(`document.querySelector('[data-tab="settings"]').click()`);
+      await new Promise((r) => setTimeout(r, 600));
+      await snap("settings");
+      await win.webContents.executeJavaScript(`document.getElementById('themeBtn').click()`);
+      await new Promise((r) => setTimeout(r, 600));
+      await snap("settings-dark");
+      // 控制台页签：网站加载到 siteView 里，单独截它的 webContents
+      await win.webContents.executeJavaScript(`document.querySelector('[data-tab="console"]').click()`);
+      await new Promise((r) => setTimeout(r, 4000));
+      const siteImg = await siteView.webContents.capturePage();
+      fs.writeFileSync(path.join(shotDir, "fy-console-siteview.png"), siteImg.toPNG());
+      app.quit();
+    });
+  }
 });
 app.on("window-all-closed", () => app.quit());
