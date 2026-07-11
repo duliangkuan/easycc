@@ -248,28 +248,38 @@ async function launchCli(tool) {
     fs.writeFileSync(path.join(codexHome, "config.toml"), configToml, "utf8");
     toolEnv = [`set "FY_API_KEY=${cfg.apiKey}"`, `set "CODEX_HOME=${codexHome}"`];
   } else {
-    // Claude Code：多个坑一起治，缺一不可（全部经真机端到端验证）——
+    // Claude Code：几个坑一起治（全部经真机端到端验证）——
     // 1) 走本地转发代理（cliProxyPort），绕开 CC 直连 https 网关在 TUN 下卡死
     // 2) 指定网关有的模型：CC 默认请求 claude-fable-5，网关没有→503 无限重试卡死
-    // 3) 独立 CLAUDE_CONFIG_DIR + settings.json skipWebFetchPreflight：
-    //    CC 会连 api.anthropic.com 做 WebFetch 域预检，被墙挂 30s
-    // 4) 禁遥测/自动更新：statsig/datadog/sentry/downloads.claude.ai 被墙会拖慢
-    const ccHome = path.join(app.getPath("userData"), "cc-home");
-    fs.mkdirSync(ccHome, { recursive: true });
-    fs.writeFileSync(
-      path.join(ccHome, "settings.json"),
-      JSON.stringify({ skipWebFetchPreflight: true }, null, 2),
-      "utf8"
-    );
+    // 3) 禁遥测/自动更新：statsig/datadog/sentry/downloads.claude.ai 被墙会拖慢
+    // 用户配置用标准 ~/.claude（隔离已按风云要求去掉）：skills/memory/MCP/自定义命令正常加载。
+    // 温和给 ~/.claude/settings.json 补 skipWebFetchPreflight（防 WebFetch 域预检连官方被墙挂 30s），
+    // 仅在该字段缺失时补，保留用户其它设置。
+    try {
+      const dir = path.join(require("os").homedir(), ".claude");
+      fs.mkdirSync(dir, { recursive: true });
+      const sf = path.join(dir, "settings.json");
+      let s = {};
+      try {
+        s = JSON.parse(fs.readFileSync(sf, "utf8"));
+      } catch {
+        /* 无或坏文件：当空对象 */
+      }
+      if (s.skipWebFetchPreflight === undefined) {
+        s.skipWebFetchPreflight = true;
+        fs.writeFileSync(sf, JSON.stringify(s, null, 2), "utf8");
+      }
+    } catch {
+      /* 写不了就算了，不阻塞启动 */
+    }
     const baseForCc = cliProxyPort
       ? `http://127.0.0.1:${cliProxyPort}`
-      : cfg.baseUrl; // 代理没起来的兜底：直连（也许能通）
+      : cfg.baseUrl; // 代理没起来的兜底：直连
     toolEnv = [
       `set "ANTHROPIC_BASE_URL=${baseForCc}"`,
       `set "ANTHROPIC_AUTH_TOKEN=${cfg.apiKey}"`,
       'set "ANTHROPIC_MODEL=claude-sonnet-4-5"',
       'set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5"',
-      `set "CLAUDE_CONFIG_DIR=${ccHome}"`,
       'set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"',
       'set "DISABLE_AUTOUPDATER=1"',
       'set "DISABLE_TELEMETRY=1"',
