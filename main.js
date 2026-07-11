@@ -5,8 +5,9 @@ const http = require("http");
 const path = require("path");
 const fs = require("fs");
 
-// CLI 二进制下载源：优先 ECS（杭州，国内快），失败兜底 GitHub Release
+// CLI 二进制下载源，按序兜底：OSS（北京，带宽不受 ECS 限制）→ ECS（杭州）→ GitHub
 const BIN_SOURCES = [
+  "https://iaelitehub.oss-cn-beijing.aliyuncs.com/easycc",
   "https://api.dufengyun.xyz/download",
   "https://github.com/duliangkuan/fy-desktop/releases/download/binaries",
 ];
