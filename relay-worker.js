@@ -10,11 +10,16 @@ const BIG = process.env.RELAY_MODEL || "claude-sonnet-4-5";
 const SMALL = process.env.RELAY_SMALL || "claude-haiku-4-5";
 const target = new URL(UP);
 
-// 网关已有的模型名放行；其余一律改写（大模型→BIG，含 haiku/fast/small 的→SMALL）
-const KNOWN = /sonnet|haiku|opus|deepseek|glm/i;
+// 改写规则：网关已有的模型原样放行（模型广场选中的模型经 ANTHROPIC_MODEL 直达这里）；
+// 网关没有的（如 CC 默认的 claude-fable-5）：小模型请求→SMALL，其余→BIG。
+// 只放行「已在网关配好价格且验证可用」的模型（配漏价格的模型进来会被网关拒，宁可改写）
+const GATEWAY_MODELS = new Set([
+  "claude-sonnet-4-5", "claude-opus-4", "claude-haiku-4-5",
+  "deepseek-ai/DeepSeek-V3.2", "deepseek-ai/DeepSeek-V4-Flash", "deepseek-v3",
+]);
 function remap(model) {
-  if (!model || KNOWN.test(model)) return model;
-  return /haiku|fast|small|mini/i.test(model) ? SMALL : BIG;
+  if (model && GATEWAY_MODELS.has(model)) return model;
+  return /haiku|fast|small|mini/i.test(model || "") ? SMALL : BIG;
 }
 
 const server = http.createServer((req, res) => {

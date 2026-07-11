@@ -278,7 +278,7 @@ async function launchCli(tool) {
     toolEnv = [
       `set "ANTHROPIC_BASE_URL=${baseForCc}"`,
       `set "ANTHROPIC_AUTH_TOKEN=${cfg.apiKey}"`,
-      'set "ANTHROPIC_MODEL=claude-sonnet-4-5"',
+      `set "ANTHROPIC_MODEL=${cfg.model || "claude-sonnet-4-5"}"`,
       'set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5"',
       'set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"',
       'set "DISABLE_AUTOUPDATER=1"',
@@ -392,6 +392,116 @@ ipcMain.handle("save-config", (_e, cfg) => {
 ipcMain.handle("app-version", () => app.getVersion());
 ipcMain.handle("ping", (_e, baseUrl) => pingGateway(baseUrl));
 ipcMain.handle("api", (_e, pathname, opts) => apiFetch(pathname, opts || {}));
+
+// ── 网络自检：经 relay（node/OpenSSL，与 CC 同路径）测网关连通 ──
+ipcMain.handle("net-check", () => {
+  return new Promise((resolve) => {
+    if (!cliProxyPort) return resolve({ ok: false, error: "本地代理未就绪" });
+    const t0 = Date.now();
+    const req = http.get({ host: "127.0.0.1", port: cliProxyPort, path: "/" }, (res) => {
+      res.resume();
+      // relay 返回 502 = 它连不上网关（多为 VPN 劫持）；其余状态码都算通
+      if (res.statusCode === 502) resolve({ ok: false, error: "网关连接被拦截" });
+      else resolve({ ok: true, ms: Date.now() - t0 });
+    });
+    req.setTimeout(12000, () => {
+      req.destroy();
+      resolve({ ok: false, error: "连接超时" });
+    });
+    req.on("error", (e) => resolve({ ok: false, error: e.message }));
+  });
+});
+
+// ── Skill：已安装列表 / 下载安装到 ~/.claude/skills/<slug>/ ──
+const skillsDir = () => path.join(require("os").homedir(), ".claude", "skills");
+
+ipcMain.handle("skill-installed", () => {
+  try {
+    return fs.readdirSync(skillsDir(), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle("skill-install", async (_e, slug, variant) => {
+  const cfg = loadConfig();
+  if (!cfg.session) return { ok: false, error: "请先登录账户" };
+  if (!/^[\w-]+$/.test(slug)) return { ok: false, error: "非法 slug" };
+  const url = new URL(`${API_BASE}/api/download/skill?slug=${slug}&variant=${variant || "pro"}`);
+  return new Promise((resolve) => {
+    const req = https.get(
+      url,
+      { headers: { Cookie: `fy_session=${cfg.session}`, "User-Agent": `EasyCC/${app.getVersion()}` } },
+      (res) => {
+        if (res.statusCode !== 200) {
+          let buf = "";
+          res.on("data", (d) => (buf += d));
+          res.on("end", () => {
+            let msg = `下载失败 HTTP ${res.statusCode}`;
+            try { msg = JSON.parse(buf).error || msg; } catch { /* 保持默认 */ }
+            resolve({ ok: false, error: msg });
+          });
+          return;
+        }
+        const tmp = path.join(require("os").tmpdir(), `easycc-skill-${slug}.zip`);
+        const file = fs.createWriteStream(tmp);
+        res.pipe(file);
+        file.on("finish", () => file.close(() => {
+          try {
+            const dest = path.join(skillsDir(), slug);
+            fs.rmSync(dest, { recursive: true, force: true });
+            fs.mkdirSync(dest, { recursive: true });
+            execFileSync("tar", ["-xf", tmp, "-C", dest]); // Win10+ bsdtar 支持 zip
+            fs.rmSync(tmp, { force: true });
+            resolve({ ok: true, dest });
+          } catch (e) {
+            resolve({ ok: false, error: `解压失败：${e.message}` });
+          }
+        }));
+      }
+    );
+    req.setTimeout(60000, () => { req.destroy(); resolve({ ok: false, error: "下载超时" }); });
+    req.on("error", (e) => resolve({ ok: false, error: e.message }));
+  });
+});
+
+// ── Memory：读写 ~/.claude/CLAUDE.md + fs.watch 实时推送 ──
+const memoryPath = () => path.join(require("os").homedir(), ".claude", "CLAUDE.md");
+let memoryWatcher = null;
+
+ipcMain.handle("memory-read", () => {
+  try {
+    return { ok: true, content: fs.readFileSync(memoryPath(), "utf8") };
+  } catch {
+    return { ok: true, content: "" }; // 还没有 memory 文件也算正常
+  }
+});
+ipcMain.handle("memory-write", (_e, content) => {
+  try {
+    fs.mkdirSync(path.dirname(memoryPath()), { recursive: true });
+    fs.writeFileSync(memoryPath(), content, "utf8");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+ipcMain.handle("memory-watch", () => {
+  if (memoryWatcher) return { ok: true };
+  try {
+    fs.mkdirSync(path.dirname(memoryPath()), { recursive: true });
+    // watch 目录而非文件：编辑器/CC 常用「写临时文件再改名」保存，watch 文件会断
+    memoryWatcher = fs.watch(path.dirname(memoryPath()), (_ev, fname) => {
+      if (fname === "CLAUDE.md" && win && !win.isDestroyed()) {
+        win.webContents.send("memory-changed");
+      }
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
 ipcMain.handle("msgbox", (_e, message) =>
   dialog.showMessageBox(win, { type: "warning", title: "EasyCC", message, buttons: ["确定"] })
 );
@@ -484,12 +594,22 @@ app.whenReady().then(() => {
         fs.writeFileSync(path.join(shotDir, `fy-${name}.png`), img.toPNG());
       };
       await new Promise((r) => setTimeout(r, 1500));
-      for (const tab of ["launch", "account", "keys", "redeem", "usage", "notice", "settings"]) {
+      for (const tab of ["launch", "account", "keys", "redeem", "usage", "skills", "memory", "notice", "settings"]) {
         await win.webContents.executeJavaScript(
           `(document.querySelector('[data-tab="${tab}"]') || document.querySelector('[data-goto="${tab}"]')).click()`
         );
-        await new Promise((r) => setTimeout(r, 900));
+        await new Promise((r) => setTimeout(r, tab === "skills" ? 3000 : 900));
         await snap(tab);
+        if (tab === "memory") {
+          // 实时刷新自动验证：外部改 CLAUDE.md → fs.watch 应推动界面更新 → 再截一张对比
+          const mp = path.join(require("os").homedir(), ".claude", "CLAUDE.md");
+          const bak = fs.existsSync(mp) ? fs.readFileSync(mp, "utf8") : null;
+          fs.writeFileSync(mp, "# EasyCC 实时刷新验证\n\n- 这行字是**外部写入**的\n- 界面若显示本内容 = fs.watch 生效\n\n> 引用块样式检查\n\n`行内代码` 与 **粗体** 混排\n", "utf8");
+          await new Promise((r) => setTimeout(r, 1200));
+          await snap("memory-live");
+          if (bak === null) fs.rmSync(mp, { force: true });
+          else fs.writeFileSync(mp, bak, "utf8");
+        }
       }
       await win.webContents.executeJavaScript(`document.getElementById('themeBtn').click()`);
       await new Promise((r) => setTimeout(r, 600));

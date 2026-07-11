@@ -301,6 +301,95 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .qr-img { width: 130px; border-radius: 8px; flex: none; }
 .qr-title { font-weight: 700; font-size: 14.5px; margin-bottom: 6px; }
 
+/* ══ 模型广场 ══ */
+.model-bar { display: flex; align-items: center; gap: 14px; margin-top: 20px; flex-wrap: wrap; }
+.model-label { font-size: 12.5px; font-weight: 700; color: var(--text-3); flex: none; }
+.model-chips { display: flex; gap: 10px; flex-wrap: wrap; }
+.model-chip {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  background: var(--surface); border: 1.5px solid var(--border); border-radius: 10px;
+  padding: 8px 16px; cursor: pointer; font-family: inherit;
+  transition: border-color .12s, background .12s;
+}
+.model-chip b { font-size: 13px; color: var(--text); }
+.model-chip span { font-size: 11px; color: var(--text-3); }
+.model-chip:hover { border-color: var(--accent); }
+.model-chip.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.model-chip.active b { color: var(--accent); }
+
+.stat-sub { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+
+/* ══ 网络诊断卡 ══ */
+.diag-card {
+  margin-top: 18px;
+  background: color-mix(in srgb, var(--err) 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  border-radius: 10px;
+  padding: 16px 20px;
+  font-size: 12.5px; color: var(--text-2); line-height: 1.9;
+}
+.diag-title { font-weight: 700; font-size: 13.5px; color: var(--err); margin-bottom: 6px; }
+.diag-card b { color: var(--text); }
+.diag-code {
+  background: var(--input); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; margin: 6px 0;
+  font-family: Consolas, monospace; font-size: 12px; color: var(--text);
+  white-space: pre; overflow-x: auto;
+}
+.diag-card code { font-family: Consolas, monospace; background: var(--elevated); padding: 1px 5px; border-radius: 4px; }
+
+/* ══ Skill 商店 ══ */
+.skill-grid {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+.skill-card { min-height: 150px; }
+.skill-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.skill-head .tool-name { padding-right: 0; }
+.skill-card .tool-desc { margin-top: 6px; }
+
+/* ══ Memory ══ */
+.mem-bar { display: flex; align-items: center; gap: 10px; margin-top: 22px; }
+.mem-bar .spacer { flex: 1; }
+#memLive { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.mem-panel {
+  margin-top: 12px;
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  min-height: 320px;
+  max-width: 860px;
+}
+.mem-prose { padding: 26px 32px; font-size: 13.5px; line-height: 1.9; color: var(--text); }
+.mem-empty { color: var(--text-3); text-align: center; padding: 60px 20px; line-height: 2; }
+.mem-prose h1 { font-size: 19px; margin: 14px 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.mem-prose h2 { font-size: 16px; margin: 14px 0 6px; color: var(--accent); }
+.mem-prose h3 { font-size: 14px; margin: 10px 0 4px; }
+.mem-prose ul { padding-left: 20px; margin: 4px 0; }
+.mem-prose li { margin: 3px 0; }
+.mem-prose blockquote {
+  border-left: 3px solid var(--accent); padding: 4px 14px; margin: 8px 0;
+  background: color-mix(in srgb, var(--accent) 6%, transparent); border-radius: 0 8px 8px 0;
+  color: var(--text-2);
+}
+.mem-prose hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.mem-prose .md-gap { height: 8px; }
+.md-code {
+  background: var(--input); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; margin: 8px 0; overflow-x: auto;
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; line-height: 1.6;
+}
+.md-inline { font-family: Consolas, monospace; background: var(--elevated); padding: 1px 6px; border-radius: 4px; font-size: 12.5px; }
+.md-link { color: var(--accent); font-weight: 600; }
+.mem-editor {
+  width: 100%; min-height: 420px; border: none; outline: none; resize: vertical;
+  background: var(--input); color: var(--text);
+  border-radius: 12px; padding: 24px 28px;
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; line-height: 1.8;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar { width: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--elevated); border-radius: 99px; }

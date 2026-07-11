@@ -46,6 +46,14 @@
         <svg viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 16v-5M12 16V8M17 16v-8"/></svg>
         <span>用量统计</span>
       </div>
+      <div class="nav-item" data-tab="skills">
+        <svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.2L19 10l-5.1 1.8L12 17l-1.9-5.2L5 10l5.1-1.8z"/><path d="M19 15l.9 2.4L22 18l-2.1.8L19 21l-.9-2.2L16 18l2.1-.6z"/><path d="M5 2l.7 1.9L7.5 4.5l-1.8.7L5 7l-.7-1.8L2.5 4.5l1.8-.6z"/></svg>
+        <span>Skill 商店</span>
+      </div>
+      <div class="nav-item" data-tab="memory">
+        <svg viewBox="0 0 24 24"><path d="M9.5 2a2.5 2.5 0 0 1 2.5 2.5V20a2.5 2.5 0 0 1-5 0 2.5 2.5 0 0 1-2.4-3.1A2.5 2.5 0 0 1 3 14.5a2.5 2.5 0 0 1 .6-4A2.5 2.5 0 0 1 5 6a2.5 2.5 0 0 1 2-4 2.5 2.5 0 0 1 2.5 0z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5V20a2.5 2.5 0 0 0 5 0 2.5 2.5 0 0 0 2.4-3.1 2.5 2.5 0 0 0 1.6-2.4 2.5 2.5 0 0 0-.6-4A2.5 2.5 0 0 0 19 6a2.5 2.5 0 0 0-2-4 2.5 2.5 0 0 0-2.5 0z"/></svg>
+        <span>Memory</span>
+      </div>
       <div class="nav-item" data-tab="notice">
         <svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
         <span>公告</span>
@@ -72,6 +80,36 @@
       <div class="page-head">
         <h1>应用启动</h1>
         <p>一键启动 AI 编程工具，专属 Key 已接入国产大模型网关，无需科学上网</p>
+      </div>
+      <!-- 模型广场：选中哪个，CC 就用哪个驱动 -->
+      <div class="model-bar">
+        <span class="model-label">驱动模型</span>
+        <div class="model-chips" id="modelChips">
+          <button class="model-chip" data-model="claude-sonnet-4-5">
+            <b>DeepSeek 旗舰</b><span>推荐 · 编程主力</span>
+          </button>
+          <button class="model-chip" data-model="deepseek-ai/DeepSeek-V3.2">
+            <b>DeepSeek V3.2</b><span>经典稳定</span>
+          </button>
+          <button class="model-chip" data-model="deepseek-ai/DeepSeek-V4-Flash">
+            <b>V4 Flash</b><span>极速 · 省额度</span>
+          </button>
+        </div>
+      </div>
+      <!-- 网络自检失败时显示的诊断卡 -->
+      <div class="diag-card" id="netDiag" hidden>
+        <div class="diag-title">⚠️ 检测到网络连接被拦截，启动 CC 可能失败</div>
+        <p>你可能开着 VPN / 代理软件（Clash 等），它把 EasyCC 到国内网关的连接劫持了。两种解决办法（任选其一）：</p>
+        <p><b>办法一（最简单）</b>：彻底退出 VPN——右下角托盘图标右键退出整个程序（仅关闭窗口无效），然后点下方「重新检测」。</p>
+        <p><b>办法二（VPN 不想退）</b>：给代理软件加直连规则。Clash 用户把下面两段分别加进配置的 <code>rules</code> 最前面和 <code>dns.fake-ip-filter</code>，保存重载：</p>
+        <pre class="diag-code" id="diagRule">- DOMAIN-SUFFIX,dufengyun.xyz,DIRECT
+- IP-CIDR,115.29.233.78/32,DIRECT,no-resolve</pre>
+        <pre class="diag-code">- +.dufengyun.xyz</pre>
+        <div class="field-row" style="margin-top:10px">
+          <button class="btn btn-ghost" id="diagCopyBtn">复制直连规则</button>
+          <button class="btn" id="diagRetryBtn">重新检测</button>
+          <span class="field-help" id="diagStatus"></span>
+        </div>
       </div>
       <div class="card-grid">
         <div class="tool-card" id="card-cc">
@@ -175,6 +213,7 @@
           <div class="stat-card">
             <div class="stat-label">兑换比率</div>
             <div class="stat-num small" id="rateText">—</div>
+            <div class="stat-sub">充值比率：1 元 = 10 积分</div>
           </div>
         </div>
         <div class="panel">
@@ -234,6 +273,36 @@
           <p class="field-help" id="usageMsg">&nbsp;</p>
         </div>
       </div>
+    </section>
+
+    <!-- Skill 商店 -->
+    <section class="page" id="page-skills" hidden>
+      <div class="page-head">
+        <h1>Skill 商店</h1>
+        <p>给 Claude Code 装技能：一键安装到本地，重启 CC 即生效，积分直接购买</p>
+      </div>
+      <div id="skillList" class="skill-grid"><p class="field-help">加载中…</p></div>
+      <p class="field-help" id="skillMsg">&nbsp;</p>
+    </section>
+
+    <!-- Memory 可视化 -->
+    <section class="page" id="page-memory" hidden>
+      <div class="page-head">
+        <h1>Memory</h1>
+        <p>Claude Code 的全局记忆（CLAUDE.md）——CC 记住的偏好和约定都在这里，改动实时同步</p>
+      </div>
+      <div class="mem-bar">
+        <span class="chip" id="memLive">● 实时同步中</span>
+        <span class="spacer"></span>
+        <button class="btn btn-ghost" id="memEditBtn">编辑</button>
+        <button class="btn" id="memSaveBtn" hidden>保存</button>
+        <button class="btn btn-ghost" id="memCancelBtn" hidden>取消</button>
+      </div>
+      <div class="mem-panel">
+        <div id="memView" class="mem-prose"></div>
+        <textarea id="memEditor" class="mem-editor" hidden spellcheck="false"></textarea>
+      </div>
+      <p class="field-help" id="memMsg">&nbsp;</p>
     </section>
 
     <!-- 公告 -->

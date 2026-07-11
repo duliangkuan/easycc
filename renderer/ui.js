@@ -9,7 +9,7 @@ const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : "—");
 let me = null; // /api/me 的 me 对象；null = 未登录
 
 /* ── 页签 ── */
-const PAGES = ["launch", "account", "keys", "redeem", "usage", "notice", "settings"];
+const PAGES = ["launch", "account", "keys", "redeem", "usage", "skills", "memory", "notice", "settings"];
 const LOGIN_GATED = { keys: "#keysPanel", redeem: "#redeemWrap", usage: "#usageWrap" };
 
 let currentTab = "launch";
@@ -28,6 +28,8 @@ function setTab(tab) {
   if (tab === "keys" && me) loadKeys();
   if (tab === "redeem" && me) loadRedeem();
   if (tab === "usage" && me) loadUsage();
+  if (tab === "skills") loadSkills();
+  if (tab === "memory") loadMemory();
   if (tab === "notice") loadNotice();
   if (tab === "settings") loadSettingsForm();
 }
@@ -446,12 +448,211 @@ $("#pingBtn").addEventListener("click", async () => {
   }
 });
 
+/* ══ 模型广场：选中即保存，CC 下次启动生效 ══ */
+
+async function initModelChips() {
+  const cfg = await window.fy.getConfig();
+  const cur = cfg.model || "claude-sonnet-4-5";
+  $$(".model-chip").forEach((c) => {
+    c.classList.toggle("active", c.dataset.model === cur);
+    c.addEventListener("click", async () => {
+      $$(".model-chip").forEach((x) => x.classList.remove("active"));
+      c.classList.add("active");
+      const latest = await window.fy.getConfig();
+      await window.fy.saveConfig({ ...latest, model: c.dataset.model });
+    });
+  });
+}
+
+/* ══ 网络自检（走 relay，与 CC 同路径）══ */
+
+async function runNetCheck() {
+  const diag = $("#netDiag");
+  const r = await window.fy.netCheck();
+  diag.hidden = r.ok;
+  return r;
+}
+$("#diagRetryBtn").addEventListener("click", async () => {
+  const st = $("#diagStatus");
+  st.textContent = "检测中…";
+  const r = await runNetCheck();
+  st.textContent = r.ok ? "" : `仍被拦截（${r.error}），按上面办法处理后再试`;
+});
+$("#diagCopyBtn").addEventListener("click", async () => {
+  await navigator.clipboard.writeText(
+    "- DOMAIN-SUFFIX,dufengyun.xyz,DIRECT\n- IP-CIDR,115.29.233.78/32,DIRECT,no-resolve\n# fake-ip-filter 加：\n- +.dufengyun.xyz"
+  );
+  $("#diagStatus").textContent = "✓ 已复制";
+});
+
+/* ══ Skill 商店 ══ */
+
+let installedSkills = [];
+
+async function loadSkills() {
+  const list = $("#skillList");
+  list.innerHTML = '<p class="field-help">加载中…</p>';
+  const [r, installed] = await Promise.all([window.fy.api("/api/skills"), window.fy.skillInstalled()]);
+  installedSkills = installed;
+  if (!r.ok) return (list.innerHTML = `<p class="field-help err">${r.error}</p>`);
+  if (!r.skills.length) return (list.innerHTML = '<p class="field-help">商店暂时没有上架 Skill，敬请期待</p>');
+  list.innerHTML = "";
+  for (const s of r.skills) list.appendChild(skillCard(s));
+}
+
+function skillCard(s) {
+  const el = document.createElement("div");
+  el.className = "tool-card skill-card";
+  const isInstalled = installedSkills.includes(s.slug);
+  const free = s.pricePoints === 0;
+  el.innerHTML = `
+    <div class="skill-head">
+      <div class="tool-name">${esc(s.title)}</div>
+      <span class="chip ${s.owned || free ? "on" : ""}">${free ? "限时免费" : s.owned ? "已购" : fmt(s.pricePoints) + " 积分"}</span>
+    </div>
+    <div class="tool-desc">${esc(s.subtitle || s.desc.slice(0, 80))}</div>
+    <div class="tool-status">${s.version ? "v" + esc(s.version) + " · " : ""}${isInstalled ? "✓ 已安装（重启 CC 生效）" : "未安装"}</div>
+    <button class="btn btn-launch"></button>`;
+  const btn = el.querySelector("button");
+  const setBtn = () => {
+    const owned = s.owned || free;
+    btn.textContent = isInstalled ? "重新安装" : owned ? "安装到本地" : `${fmt(s.pricePoints)} 积分购买`;
+  };
+  setBtn();
+  btn.addEventListener("click", async () => {
+    const msg = $("#skillMsg");
+    msg.className = "field-help";
+    if (!me) {
+      msg.textContent = "先登录账户再购买/安装";
+      return setTab("account");
+    }
+    btn.disabled = true;
+    try {
+      if (!s.owned && !free) {
+        msg.textContent = "购买中…";
+        const buy = await window.fy.api("/api/orders", { method: "POST", body: { productId: s.id } });
+        if (!buy.ok) {
+          msg.className = "field-help err";
+          msg.textContent = buy.error;
+          return;
+        }
+        s.owned = true;
+        msg.className = "field-help ok";
+        msg.textContent = `✓ ${buy.message}`;
+      }
+      msg.textContent = "下载安装中…";
+      const inst = await window.fy.skillInstall(s.slug, free && !s.owned ? "lite" : "pro");
+      if (!inst.ok) {
+        msg.className = "field-help err";
+        msg.textContent = inst.error;
+        return;
+      }
+      msg.className = "field-help ok";
+      msg.textContent = `✓ 已安装「${s.title}」——重启 Claude Code 后生效（关掉 CC 窗口重新点启动）`;
+      loadSkills();
+    } finally {
+      btn.disabled = false;
+      setBtn();
+    }
+  });
+  return el;
+}
+
+function esc(x) {
+  const d = document.createElement("span");
+  d.textContent = x ?? "";
+  return d.innerHTML;
+}
+
+/* ══ Memory 可视化 ══ */
+
+let memRaw = "";
+let memEditing = false;
+
+/** 轻量 markdown 渲染（无 CDN）：标题/粗体/斜体/行内码/码块/列表/引用/链接/分割线 */
+function mdRender(md) {
+  if (!md || !md.trim()) {
+    return '<p class="mem-empty">还没有全局 Memory。<br/><br/>点右上角「编辑」写下你希望 Claude Code 一直记住的偏好和约定；<br/>或在 CC 对话里以 <code class="md-inline">#</code> 开头发消息，CC 会自己记到这里。</p>';
+  }
+  const lines = esc(md).split("\n");
+  let html = "", inCode = false, inList = false;
+  const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      closeList();
+      html += inCode ? "</code></pre>" : '<pre class="md-code"><code>';
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { html += line + "\n"; continue; }
+    let l = line
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
+      .replace(/`([^`]+)`/g, '<code class="md-inline">$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="md-link">$1</span>');
+    if (/^###\s/.test(l)) { closeList(); html += `<h3>${l.slice(4)}</h3>`; }
+    else if (/^##\s/.test(l)) { closeList(); html += `<h2>${l.slice(3)}</h2>`; }
+    else if (/^#\s/.test(l)) { closeList(); html += `<h1>${l.slice(2)}</h1>`; }
+    else if (/^\s*[-*]\s/.test(l)) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${l.replace(/^\s*[-*]\s/, "")}</li>`; }
+    else if (/^>\s?/.test(l)) { closeList(); html += `<blockquote>${l.replace(/^>\s?/, "")}</blockquote>`; }
+    else if (/^\s*(---|\*\*\*)\s*$/.test(l)) { closeList(); html += "<hr/>"; }
+    else if (l.trim() === "") { closeList(); html += '<div class="md-gap"></div>'; }
+    else { closeList(); html += `<p>${l}</p>`; }
+  }
+  closeList();
+  if (inCode) html += "</code></pre>";
+  return html || '<p class="field-help">还没有全局 Memory。点「编辑」写下你希望 Claude Code 一直记住的偏好和约定，或在 CC 对话里以 # 开头发消息让它自己记。</p>';
+}
+
+async function loadMemory() {
+  if (memEditing) return; // 编辑中不覆盖
+  const r = await window.fy.memoryRead();
+  memRaw = r.content || "";
+  $("#memView").innerHTML = mdRender(memRaw);
+  window.fy.memoryWatch();
+}
+
+window.fy.onMemoryChanged(() => {
+  if (currentTab === "memory" && !memEditing) {
+    loadMemory();
+    const live = $("#memLive");
+    live.textContent = "● 刚刚同步";
+    setTimeout(() => (live.textContent = "● 实时同步中"), 1500);
+  }
+});
+
+function setMemEditing(on) {
+  memEditing = on;
+  $("#memView").hidden = on;
+  $("#memEditor").hidden = !on;
+  $("#memEditBtn").hidden = on;
+  $("#memSaveBtn").hidden = !on;
+  $("#memCancelBtn").hidden = !on;
+}
+$("#memEditBtn").addEventListener("click", () => {
+  $("#memEditor").value = memRaw;
+  setMemEditing(true);
+  $("#memEditor").focus();
+});
+$("#memCancelBtn").addEventListener("click", () => setMemEditing(false));
+$("#memSaveBtn").addEventListener("click", async () => {
+  const r = await window.fy.memoryWrite($("#memEditor").value);
+  const msg = $("#memMsg");
+  msg.className = r.ok ? "field-help ok" : "field-help err";
+  msg.textContent = r.ok ? "✓ 已保存，CC 下次启动即读取" : r.error;
+  setMemEditing(false);
+  loadMemory();
+  setTimeout(() => (msg.textContent = " "), 2500);
+});
+
 /* ── 启动初始化 ── */
 (async () => {
   const cfg = await window.fy.getConfig();
   applyTheme(cfg.theme === "dark" ? "dark" : "light");
   $("#verText").textContent = "v" + (await window.fy.version());
   refreshBinStatus();
+  initModelChips();
+  setTimeout(runNetCheck, 2500); // 等 relay 起来后自检网络，被 VPN 拦截时给诊断卡
   await refreshMe();
   if (me) syncKeyToConfig(); // 登录态下每次开 App 校准一次启动 Key
   setTab(currentTab); // 登录态确定后重放当前页签，消掉「抢先点开门禁页」的竞态
