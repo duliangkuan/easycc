@@ -330,14 +330,13 @@
         </div>
         <p class="field-help">登录账户后自动同步，手动粘贴也可以</p>
 
-        <label class="field-label">接入地址 Base URL</label>
+        <label class="field-label">网关连接</label>
         <div class="field-row">
-          <input id="baseUrl" class="input mono" placeholder="https://api.dufengyun.xyz" spellcheck="false" />
-          <button class="btn btn-ghost" id="pingBtn">测延迟</button>
+          <span class="field-help" id="connStatus" style="flex:1">检测中…</span>
+          <button class="btn btn-ghost" id="connBtn">重新检测</button>
         </div>
-        <p class="field-help" id="pingResult">&nbsp;</p>
 
-        <div class="field-row" style="margin-top:6px">
+        <div class="field-row" style="margin-top:14px">
           <button class="btn" id="saveBtn">保存配置</button>
           <span class="save-msg" id="saveMsg"></span>
         </div>

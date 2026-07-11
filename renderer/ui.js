@@ -412,9 +412,25 @@ window.fy.onProgress((p) => {
 async function loadSettingsForm() {
   const cfg = await window.fy.getConfig();
   $("#apiKey").value = cfg.apiKey || "";
-  $("#baseUrl").value = cfg.baseUrl || "https://api.dufengyun.xyz";
   $("#saveMsg").textContent = "";
+  checkConn();
 }
+
+/** 连接状态检测：走 relay（与 CC 完全同一条链路），不再用主进程直连误导 */
+async function checkConn() {
+  const el = $("#connStatus");
+  el.className = "field-help";
+  el.textContent = "检测中…";
+  const r = await window.fy.netCheck();
+  if (r.ok) {
+    el.className = "field-help ok";
+    el.textContent = `✓ 连接正常 · 延迟 ${r.ms}ms（与 Claude Code 同链路实测）`;
+  } else {
+    el.className = "field-help err";
+    el.textContent = `✗ 连接异常：${r.error} —— 若开着 VPN 请彻底退出后重试`;
+  }
+}
+$("#connBtn").addEventListener("click", checkConn);
 
 $("#eyeBtn").addEventListener("click", () => {
   const input = $("#apiKey");
@@ -428,24 +444,9 @@ $("#saveBtn").addEventListener("click", async () => {
   await window.fy.saveConfig({
     ...cfg,
     apiKey: $("#apiKey").value.trim(),
-    baseUrl: $("#baseUrl").value.trim() || "https://api.dufengyun.xyz",
   });
   $("#saveMsg").textContent = "✓ 已保存";
   setTimeout(() => ($("#saveMsg").textContent = ""), 2000);
-});
-
-$("#pingBtn").addEventListener("click", async () => {
-  const el = $("#pingResult");
-  el.className = "field-help";
-  el.textContent = "测试中…";
-  const r = await window.fy.ping($("#baseUrl").value.trim());
-  if (r.ok) {
-    el.className = "field-help ok";
-    el.textContent = `✓ 网关连通，延迟 ${r.ms}ms`;
-  } else {
-    el.className = "field-help err";
-    el.textContent = `✗ 连接失败：${r.error}`;
-  }
 });
 
 /* ══ 模型广场：选中即保存，CC 下次启动生效 ══ */
