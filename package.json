@@ -1,7 +1,7 @@
 {
   "name": "fy-desktop",
   "version": "2.0.0",
-  "description": "风云AI工具站 桌面版",
+  "description": "EasyCC：装上就能用 Claude Code / Codex 的桌面工具",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -15,7 +15,7 @@
   },
   "build": {
     "appId": "com.fengyun.aitools",
-    "productName": "风云AI工具站",
+    "productName": "EasyCC",
     "directories": {
       "output": "dist"
     },
@@ -35,7 +35,7 @@
       "allowToChangeInstallationDirectory": true,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "shortcutName": "风云AI工具站",
+      "shortcutName": "EasyCC",
       "artifactName": "EasyCC-Setup-${version}.exe"
     },
     "compression": "maximum",

@@ -10,6 +10,8 @@ const BIN_SOURCES = [
   "https://api.dufengyun.xyz/download",
   "https://github.com/duliangkuan/fy-desktop/releases/download/binaries",
 ];
+// 账户后端（仅 REST API，App 内不加载任何网页）
+const API_BASE = process.env.FY_API_BASE || "https://fy.dufengyun.xyz";
 
 const configPath = () => path.join(app.getPath("userData"), "config.json");
 const binDir = () => path.join(app.getPath("userData"), "bin");
@@ -18,7 +20,7 @@ function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(configPath(), "utf-8"));
   } catch {
-    return { apiKey: "", baseUrl: "https://api.dufengyun.xyz", theme: "light" };
+    return { apiKey: "", baseUrl: "https://api.dufengyun.xyz", theme: "light", session: "" };
   }
 }
 function saveConfig(cfg) {
@@ -34,8 +36,9 @@ function createWindow() {
     height: 820,
     minWidth: 940,
     minHeight: 620,
-    title: "风云AI工具站",
+    title: "EasyCC",
     frame: false,
+    icon: path.join(__dirname, "renderer", "assets", "icon.png"),
     backgroundColor: cfg.theme === "dark" ? "#211f1c" : "#efeeeb",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -198,6 +201,55 @@ async function launchCli(tool) {
   return { ok: true };
 }
 
+// ── 账户 API 客户端：JWT 存 config.session，请求带 Cookie，响应捕获 Set-Cookie ──
+function apiFetch(pathname, { method = "GET", body } = {}) {
+  return new Promise((resolve) => {
+    if (!pathname.startsWith("/api/")) return resolve({ ok: false, error: "非法路径" });
+    const url = new URL(API_BASE + pathname);
+    const data = body ? JSON.stringify(body) : null;
+    const cfg = loadConfig();
+    const req = https.request(
+      url,
+      {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": `EasyCC/${app.getVersion()}`,
+          ...(data ? { "Content-Length": Buffer.byteLength(data) } : {}),
+          ...(cfg.session ? { Cookie: `fy_session=${cfg.session}` } : {}),
+        },
+      },
+      (res) => {
+        // 登录/登出通过 Set-Cookie 下发/清除 fy_session
+        for (const c of res.headers["set-cookie"] || []) {
+          const m = c.match(/^fy_session=([^;]*)/);
+          if (m) {
+            const latest = loadConfig();
+            latest.session = decodeURIComponent(m[1]);
+            saveConfig(latest);
+          }
+        }
+        let buf = "";
+        res.on("data", (d) => (buf += d));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(buf));
+          } catch {
+            resolve({ ok: false, error: `HTTP ${res.statusCode}` });
+          }
+        });
+      }
+    );
+    req.setTimeout(15000, () => {
+      req.destroy();
+      resolve({ ok: false, error: "请求超时，请检查网络" });
+    });
+    req.on("error", (e) => resolve({ ok: false, error: `网络错误：${e.message}` }));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
 // ── 网关连通性：GET baseUrl，量往返毫秒 ──
 function pingGateway(baseUrl) {
   return new Promise((resolve) => {
@@ -230,6 +282,7 @@ ipcMain.handle("save-config", (_e, cfg) => {
 });
 ipcMain.handle("app-version", () => app.getVersion());
 ipcMain.handle("ping", (_e, baseUrl) => pingGateway(baseUrl));
+ipcMain.handle("api", (_e, pathname, opts) => apiFetch(pathname, opts || {}));
 
 ipcMain.handle("bin-status", () => {
   const st = {};
@@ -261,11 +314,14 @@ app.whenReady().then(() => {
         const img = await win.webContents.capturePage();
         fs.writeFileSync(path.join(shotDir, `fy-${name}.png`), img.toPNG());
       };
-      await new Promise((r) => setTimeout(r, 1200));
-      await snap("launch");
-      await win.webContents.executeJavaScript(`document.querySelector('[data-tab="settings"]').click()`);
-      await new Promise((r) => setTimeout(r, 600));
-      await snap("settings");
+      await new Promise((r) => setTimeout(r, 1500));
+      for (const tab of ["launch", "account", "keys", "redeem", "usage", "notice", "settings"]) {
+        await win.webContents.executeJavaScript(
+          `(document.querySelector('[data-tab="${tab}"]') || document.querySelector('[data-goto="${tab}"]')).click()`
+        );
+        await new Promise((r) => setTimeout(r, 900));
+        await snap(tab);
+      }
       await win.webContents.executeJavaScript(`document.getElementById('themeBtn').click()`);
       await new Promise((r) => setTimeout(r, 600));
       await snap("settings-dark");
