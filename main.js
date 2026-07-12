@@ -5,23 +5,35 @@ const http = require("http");
 const path = require("path");
 const fs = require("fs");
 
-// CLI 二进制下载源，按序兜底：OSS（北京，带宽不受 ECS 限制）→ ECS（杭州）→ GitHub
+// CLI 二进制下载源，按序兜底：OSS（北京）→ ECS（杭州）→ GitHub Release
 const BIN_SOURCES = [
   "https://iaelitehub.oss-cn-beijing.aliyuncs.com/easycc",
   "https://api.dufengyun.xyz/download",
-  "https://github.com/duliangkuan/fy-desktop/releases/download/binaries",
+  "https://github.com/duliangkuan/easycc/releases/download/binaries",
 ];
-// 账户后端（仅 REST API，App 内不加载任何网页）
-const API_BASE = process.env.FY_API_BASE || "https://fy.dufengyun.xyz";
+// 免费 Skill 目录（开源仓 duliangkuan/easycc-skills），多源兜底
+const SKILL_SOURCES = [
+  "https://cdn.jsdelivr.net/gh/duliangkuan/easycc-skills@master",
+  "https://raw.githubusercontent.com/duliangkuan/easycc-skills/master",
+];
 
 const configPath = () => path.join(app.getPath("userData"), "config.json");
 const binDir = () => path.join(app.getPath("userData"), "bin");
 
+// BYOK：接入配置完全属于用户（无账户、无服务端）。预设见 renderer 的 provider 模板。
+const DEFAULT_CONFIG = {
+  provider: "deepseek",
+  apiKey: "",
+  baseUrl: "https://api.deepseek.com/anthropic",
+  model: "deepseek-chat",
+  smallModel: "deepseek-chat",
+  theme: "light",
+};
 function loadConfig() {
   try {
-    return JSON.parse(fs.readFileSync(configPath(), "utf-8"));
+    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(configPath(), "utf-8")) };
   } catch {
-    return { apiKey: "", baseUrl: "https://api.dufengyun.xyz", theme: "light", session: "" };
+    return { ...DEFAULT_CONFIG };
   }
 }
 function saveConfig(cfg) {
@@ -46,12 +58,13 @@ function startCliProxy() {
   const worker = app.isPackaged
     ? path.join(process.resourcesPath, "relay-worker.js")
     : path.join(__dirname, "relay-worker.js");
+  const cfg = loadConfig();
   relayProc = spawn(relayNodeExe(), [worker], {
     env: {
       ...process.env,
-      RELAY_UPSTREAM: loadConfig().baseUrl || "https://api.dufengyun.xyz",
-      RELAY_MODEL: "claude-sonnet-4-5",
-      RELAY_SMALL: "claude-haiku-4-5",
+      RELAY_UPSTREAM: cfg.baseUrl || DEFAULT_CONFIG.baseUrl,
+      RELAY_MODEL: cfg.model || DEFAULT_CONFIG.model,
+      RELAY_SMALL: cfg.smallModel || cfg.model || DEFAULT_CONFIG.smallModel,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -60,6 +73,17 @@ function startCliProxy() {
     if (m) cliProxyPort = Number(m[1]);
   });
   relayProc.stderr.on("data", (d) => console.error("[relay] " + d));
+}
+
+// 接入配置变更后重启 relay（上游/模型是进程 env，须重启生效）
+function restartCliProxy() {
+  try {
+    if (relayProc) relayProc.kill();
+  } catch {
+    /* 已退出 */
+  }
+  cliProxyPort = 0;
+  startCliProxy();
 }
 
 function createWindow() {
@@ -193,7 +217,7 @@ async function ensureBinary(tool) {
 async function launchCli(tool) {
   const cfg = loadConfig();
   if (!cfg.apiKey)
-    return { ok: false, error: "请先在「设置」填入你的专属 API Key（在控制台→我的 API Key 获取）" };
+    return { ok: false, error: "请先在「设置」选择接入服务商并填入你自己的 API Key（如 DeepSeek 官方，注册即得）" };
   if (process.platform !== "win32")
     return { ok: false, error: "当前版本仅支持 Windows 启动 CLI" };
 
@@ -278,8 +302,8 @@ async function launchCli(tool) {
     toolEnv = [
       `set "ANTHROPIC_BASE_URL=${baseForCc}"`,
       `set "ANTHROPIC_AUTH_TOKEN=${cfg.apiKey}"`,
-      `set "ANTHROPIC_MODEL=${cfg.model || "claude-sonnet-4-5"}"`,
-      'set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5"',
+      `set "ANTHROPIC_MODEL=${cfg.model || DEFAULT_CONFIG.model}"`,
+      `set "ANTHROPIC_SMALL_FAST_MODEL=${cfg.smallModel || cfg.model || DEFAULT_CONFIG.smallModel}"`,
       'set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"',
       'set "DISABLE_AUTOUPDATER=1"',
       'set "DISABLE_TELEMETRY=1"',
@@ -310,88 +334,55 @@ async function launchCli(tool) {
   return { ok: true };
 }
 
-// ── 账户 API 客户端：JWT 存 config.session，请求带 Cookie，响应捕获 Set-Cookie ──
-function apiFetch(pathname, { method = "GET", body } = {}) {
-  return new Promise((resolve) => {
-    if (!pathname.startsWith("/api/")) return resolve({ ok: false, error: "非法路径" });
-    const url = new URL(API_BASE + pathname);
-    const data = body ? JSON.stringify(body) : null;
-    const cfg = loadConfig();
-    const req = https.request(
-      url,
-      {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": `EasyCC/${app.getVersion()}`,
-          ...(data ? { "Content-Length": Buffer.byteLength(data) } : {}),
-          ...(cfg.session ? { Cookie: `fy_session=${cfg.session}` } : {}),
-        },
-      },
-      (res) => {
-        // 登录/登出通过 Set-Cookie 下发/清除 fy_session
-        for (const c of res.headers["set-cookie"] || []) {
-          const m = c.match(/^fy_session=([^;]*)/);
-          if (m) {
-            const latest = loadConfig();
-            latest.session = decodeURIComponent(m[1]);
-            saveConfig(latest);
-          }
+// ── 多源 GET（Skill 目录用）：依次尝试各源，返回 Buffer ──
+function fetchFromSources(relPath, timeoutMs = 20000) {
+  const tryOne = (base) =>
+    new Promise((resolve, reject) => {
+      const req = https.get(`${base}/${relPath}`, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error(`HTTP ${res.statusCode}`));
         }
-        let buf = "";
-        res.on("data", (d) => (buf += d));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(buf));
-          } catch {
-            resolve({ ok: false, error: `HTTP ${res.statusCode}` });
-          }
-        });
+        const chunks = [];
+        res.on("data", (d) => chunks.push(d));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+      });
+      req.setTimeout(timeoutMs, () => {
+        req.destroy();
+        reject(new Error("超时"));
+      });
+      req.on("error", reject);
+    });
+  return (async () => {
+    let lastErr;
+    for (const base of SKILL_SOURCES) {
+      try {
+        return await tryOne(base);
+      } catch (e) {
+        lastErr = e;
       }
-    );
-    req.setTimeout(15000, () => {
-      req.destroy();
-      resolve({ ok: false, error: "请求超时，请检查网络" });
-    });
-    req.on("error", (e) => resolve({ ok: false, error: `网络错误：${e.message}` }));
-    if (data) req.write(data);
-    req.end();
-  });
-}
-
-// ── 网关连通性：GET baseUrl，量往返毫秒 ──
-function pingGateway(baseUrl) {
-  return new Promise((resolve) => {
-    let url;
-    try {
-      url = new URL(baseUrl);
-    } catch {
-      return resolve({ ok: false, error: "地址格式不对" });
     }
-    const mod = url.protocol === "http:" ? http : https;
-    const t0 = Date.now();
-    const req = mod.get(url, (res) => {
-      res.resume(); // 只要握上手就算通，状态码不论
-      resolve({ ok: true, ms: Date.now() - t0, status: res.statusCode });
-    });
-    req.setTimeout(5000, () => {
-      req.destroy();
-      resolve({ ok: false, error: "超时（5s）" });
-    });
-    req.on("error", (e) => resolve({ ok: false, error: e.message }));
-  });
+    throw lastErr || new Error("所有源均失败");
+  })();
 }
 
 // ── IPC ──
 ipcMain.handle("launch", (_e, tool) => launchCli(tool));
 ipcMain.handle("get-config", () => loadConfig());
 ipcMain.handle("save-config", (_e, cfg) => {
+  const prev = loadConfig();
   saveConfig(cfg);
+  // 接入配置变了 → 重启 relay 让上游/模型即时生效
+  if (
+    prev.baseUrl !== cfg.baseUrl ||
+    prev.model !== cfg.model ||
+    prev.smallModel !== cfg.smallModel
+  ) {
+    restartCliProxy();
+  }
   return { ok: true };
 });
 ipcMain.handle("app-version", () => app.getVersion());
-ipcMain.handle("ping", (_e, baseUrl) => pingGateway(baseUrl));
-ipcMain.handle("api", (_e, pathname, opts) => apiFetch(pathname, opts || {}));
 
 // ── 网络自检：经 relay（node/OpenSSL，与 CC 同路径）测网关连通 ──
 ipcMain.handle("net-check", () => {
@@ -425,46 +416,37 @@ ipcMain.handle("skill-installed", () => {
   }
 });
 
-ipcMain.handle("skill-install", async (_e, slug, variant) => {
-  const cfg = loadConfig();
-  if (!cfg.session) return { ok: false, error: "请先登录账户" };
+// Skill 目录：开源仓 index.json（jsDelivr 主源 + GitHub raw 兜底），全部免费
+ipcMain.handle("skill-list", async () => {
+  try {
+    const buf = await fetchFromSources("index.json");
+    const idx = JSON.parse(buf.toString("utf8"));
+    return { ok: true, skills: idx.skills || [] };
+  } catch (e) {
+    return { ok: false, error: `目录加载失败：${e.message}（稍后重试）` };
+  }
+});
+
+ipcMain.handle("skill-install", async (_e, slug, file) => {
   if (!/^[\w-]+$/.test(slug)) return { ok: false, error: "非法 slug" };
-  const url = new URL(`${API_BASE}/api/download/skill?slug=${slug}&variant=${variant || "pro"}`);
-  return new Promise((resolve) => {
-    const req = https.get(
-      url,
-      { headers: { Cookie: `fy_session=${cfg.session}`, "User-Agent": `EasyCC/${app.getVersion()}` } },
-      (res) => {
-        if (res.statusCode !== 200) {
-          let buf = "";
-          res.on("data", (d) => (buf += d));
-          res.on("end", () => {
-            let msg = `下载失败 HTTP ${res.statusCode}`;
-            try { msg = JSON.parse(buf).error || msg; } catch { /* 保持默认 */ }
-            resolve({ ok: false, error: msg });
-          });
-          return;
-        }
-        const tmp = path.join(require("os").tmpdir(), `easycc-skill-${slug}.zip`);
-        const file = fs.createWriteStream(tmp);
-        res.pipe(file);
-        file.on("finish", () => file.close(() => {
-          try {
-            const dest = path.join(skillsDir(), slug);
-            fs.rmSync(dest, { recursive: true, force: true });
-            fs.mkdirSync(dest, { recursive: true });
-            execFileSync("tar", ["-xf", tmp, "-C", dest]); // Win10+ bsdtar 支持 zip
-            fs.rmSync(tmp, { force: true });
-            resolve({ ok: true, dest });
-          } catch (e) {
-            resolve({ ok: false, error: `解压失败：${e.message}` });
-          }
-        }));
-      }
-    );
-    req.setTimeout(60000, () => { req.destroy(); resolve({ ok: false, error: "下载超时" }); });
-    req.on("error", (e) => resolve({ ok: false, error: e.message }));
-  });
+  if (!/^[\w\-./]+\.zip$/.test(file || "") || file.includes(".."))
+    return { ok: false, error: "非法文件路径" };
+  try {
+    const buf = await fetchFromSources(file, 60000);
+    // 防御：确认是 zip（PK 头），不是的话给人话错误而不是 tar 的天书
+    if (buf[0] !== 0x50 || buf[1] !== 0x4b)
+      return { ok: false, error: "该 Skill 的安装包格式异常，请到 GitHub 反馈" };
+    const tmp = path.join(require("os").tmpdir(), `easycc-skill-${slug}.zip`);
+    fs.writeFileSync(tmp, buf);
+    const dest = path.join(skillsDir(), slug);
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.mkdirSync(dest, { recursive: true });
+    execFileSync("tar", ["-xf", tmp, "-C", dest]); // Win10+ bsdtar 支持 zip
+    fs.rmSync(tmp, { force: true });
+    return { ok: true, dest };
+  } catch (e) {
+    return { ok: false, error: `安装失败：${e.message}` };
+  }
 });
 
 // ── Memory：读写 ~/.claude/CLAUDE.md + fs.watch 实时推送 ──
@@ -547,6 +529,43 @@ app.whenReady().then(() => {
     return;
   }
 
+  // FY_SKILL_TEST=1：真机点「安装到本地」，验证下载+解压落盘
+  if (process.env.FY_SKILL_TEST) {
+    createWindow();
+    win.webContents.once("did-finish-load", async () => {
+      try {
+        await new Promise((r) => setTimeout(r, 2500));
+        await win.webContents.executeJavaScript(`document.querySelector('[data-tab="skills"]').click()`);
+        console.log("SKILLTEST step1 clicked skills tab");
+        // 等到安装按钮出现（列表加载完）再点
+        for (let i = 0; i < 20; i++) {
+          const n = await win.webContents.executeJavaScript(
+            `document.querySelectorAll('.skill-card .btn-launch').length`
+          );
+          if (n > 0) break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        const clicked = await win.webContents.executeJavaScript(
+          `(()=>{const b=document.querySelector('.skill-card .btn-launch');if(!b)return false;b.click();return true})()`
+        );
+        console.log("SKILLTEST step2 install clicked=" + clicked);
+        await new Promise((r) => setTimeout(r, 15000));
+        const msg = await win.webContents.executeJavaScript(
+          `document.getElementById('skillMsg').textContent`
+        );
+        console.log("SKILLTEST msg=[" + String(msg).trim() + "]");
+      } catch (e) {
+        console.log("SKILLTEST ERROR " + e.message);
+      }
+      for (const d of ["skill-deai-pro", "skill-shuo-zhongdian"]) {
+        const p = path.join(require("os").homedir(), ".claude", "skills", d, "SKILL.md");
+        console.log("SKILLTEST " + d + " SKILL.md=" + fs.existsSync(p));
+      }
+      app.quit();
+    });
+    return;
+  }
+
   // FY_CC_TEST=1：端到端自检——用产品完全一致的内置代理+环境变量跑真 claude.exe，验证出 token
   if (process.env.FY_CC_TEST) {
     setTimeout(() => {
@@ -564,8 +583,8 @@ app.whenReady().then(() => {
         HTTP_PROXY: "", HTTPS_PROXY: "", ALL_PROXY: "", NODE_EXTRA_CA_CERTS: "",
         ANTHROPIC_BASE_URL: `http://127.0.0.1:${cliProxyPort}`,
         ANTHROPIC_AUTH_TOKEN: cfg.apiKey,
-        ANTHROPIC_MODEL: "claude-sonnet-4-5",
-        ANTHROPIC_SMALL_FAST_MODEL: "claude-haiku-4-5",
+        ANTHROPIC_MODEL: cfg.model || DEFAULT_CONFIG.model,
+        ANTHROPIC_SMALL_FAST_MODEL: cfg.smallModel || cfg.model || DEFAULT_CONFIG.smallModel,
         CLAUDE_CONFIG_DIR: ccHome,
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
         DISABLE_AUTOUPDATER: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1",
@@ -594,7 +613,7 @@ app.whenReady().then(() => {
         fs.writeFileSync(path.join(shotDir, `fy-${name}.png`), img.toPNG());
       };
       await new Promise((r) => setTimeout(r, 1500));
-      for (const tab of ["launch", "account", "keys", "redeem", "usage", "skills", "memory", "notice", "settings"]) {
+      for (const tab of ["launch", "skills", "memory", "settings"]) {
         await win.webContents.executeJavaScript(
           `(document.querySelector('[data-tab="${tab}"]') || document.querySelector('[data-goto="${tab}"]')).click()`
         );

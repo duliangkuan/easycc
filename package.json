@@ -1,6 +1,6 @@
 {
   "name": "fy-desktop",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "EasyCC：装上就能用 Claude Code / Codex 的桌面工具",
   "main": "main.js",
   "scripts": {

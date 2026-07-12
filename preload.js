@@ -5,17 +5,16 @@ contextBridge.exposeInMainWorld("fy", {
   getConfig: () => ipcRenderer.invoke("get-config"),
   saveConfig: (cfg) => ipcRenderer.invoke("save-config", cfg),
   winCtl: (action) => ipcRenderer.invoke("win-ctl", action),
-  ping: (baseUrl) => ipcRenderer.invoke("ping", baseUrl),
-  api: (path, opts) => ipcRenderer.invoke("api", path, opts),
   msgbox: (message) => ipcRenderer.invoke("msgbox", message),
   binStatus: () => ipcRenderer.invoke("bin-status"),
   version: () => ipcRenderer.invoke("app-version"),
   onProgress: (cb) => ipcRenderer.on("cli-progress", (_e, payload) => cb(payload)),
   // 网络自检（走 relay，与 CC 同路径）
   netCheck: () => ipcRenderer.invoke("net-check"),
-  // Skill 商店
+  // Skill 目录（开源仓，全部免费）
+  skillList: () => ipcRenderer.invoke("skill-list"),
   skillInstalled: () => ipcRenderer.invoke("skill-installed"),
-  skillInstall: (slug, variant) => ipcRenderer.invoke("skill-install", slug, variant),
+  skillInstall: (slug, file) => ipcRenderer.invoke("skill-install", slug, file),
   // Memory 可视化
   memoryRead: () => ipcRenderer.invoke("memory-read"),
   memoryWrite: (content) => ipcRenderer.invoke("memory-write", content),

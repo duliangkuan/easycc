@@ -1,25 +1,23 @@
-// EasyCC CLI 本地转发代理（独立 node 进程，由 main.js 以 ELECTRON_RUN_AS_NODE 方式 fork）。
-// 为什么独立进程：Electron 主进程内嵌网络栈在 Clash TUN 下 TLS 握手会失败，
-// 而纯 node（ELECTRON_RUN_AS_NODE）的 https 正常。CC 连本地 http 秒通，代理转发到网关。
-// 附带能力：强制改写 model —— 不管 CC 发什么模型名，都映射到网关有的模型，彻底不依赖模型名。
+// EasyCC CLI 本地转发代理（独立 node 进程，由 main.js 以系统 node 启动）。
+// 为什么存在：
+// 1) Claude Code(undici/BoringSSL) 在部分 VPN 的 TUN 网卡下直连 https 会 TLS 失败，
+//    而系统 node(OpenSSL) 能正常握手 —— CC 连本地 http 秒通，由本进程转发到上游。
+// 2) 统一模型改写：CC 默认请求的模型名（如 claude-*）上游未必有，
+//    这里把主对话请求映射到用户配置的主模型、后台小任务映射到小模型。
+// 上游完全由用户配置（BYOK）：DeepSeek 官方 / 硅基流动 / 任意 Anthropic 兼容网关。
 const http = require("http");
 const https = require("https");
 
-const UP = process.env.RELAY_UPSTREAM || "https://api.dufengyun.xyz";
-const BIG = process.env.RELAY_MODEL || "claude-sonnet-4-5";
-const SMALL = process.env.RELAY_SMALL || "claude-haiku-4-5";
+const UP = process.env.RELAY_UPSTREAM || "https://api.deepseek.com/anthropic";
+const MAIN = process.env.RELAY_MODEL || "deepseek-chat";
+const SMALL = process.env.RELAY_SMALL || MAIN;
 const target = new URL(UP);
+const basePath = target.pathname.replace(/\/+$/, ""); // 支持带路径的上游（如 /anthropic）
 
-// 改写规则：网关已有的模型原样放行（模型广场选中的模型经 ANTHROPIC_MODEL 直达这里）；
-// 网关没有的（如 CC 默认的 claude-fable-5）：小模型请求→SMALL，其余→BIG。
-// 只放行「已在网关配好价格且验证可用」的模型（配漏价格的模型进来会被网关拒，宁可改写）
-const GATEWAY_MODELS = new Set([
-  "claude-sonnet-4-5", "claude-opus-4", "claude-haiku-4-5",
-  "deepseek-ai/DeepSeek-V3.2", "deepseek-ai/DeepSeek-V4-Flash", "deepseek-v3",
-]);
+// 主对话 → MAIN；CC 的后台小任务（haiku/fast/small 特征）→ SMALL
 function remap(model) {
-  if (model && GATEWAY_MODELS.has(model)) return model;
-  return /haiku|fast|small|mini/i.test(model || "") ? SMALL : BIG;
+  if (model === MAIN || model === SMALL) return model;
+  return /haiku|fast|small|mini/i.test(model || "") ? SMALL : MAIN;
 }
 
 const server = http.createServer((req, res) => {
@@ -32,7 +30,10 @@ const server = http.createServer((req, res) => {
         const j = JSON.parse(body.toString("utf8"));
         if (j.model) {
           const m = remap(j.model);
-          if (m !== j.model) { j.model = m; body = Buffer.from(JSON.stringify(j)); }
+          if (m !== j.model) {
+            j.model = m;
+            body = Buffer.from(JSON.stringify(j));
+          }
         }
       } catch {
         /* 非 JSON body 原样转发 */
@@ -40,11 +41,12 @@ const server = http.createServer((req, res) => {
     }
     const headers = { ...req.headers, host: target.hostname };
     headers["content-length"] = Buffer.byteLength(body);
-    const up = https.request(
+    const mod = target.protocol === "http:" ? http : https;
+    const up = mod.request(
       {
         host: target.hostname,
-        port: target.port || 443,
-        path: req.url,
+        port: target.port || (target.protocol === "http:" ? 80 : 443),
+        path: basePath + req.url,
         method: req.method,
         headers,
       },

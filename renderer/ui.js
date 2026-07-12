@@ -1,36 +1,45 @@
-/* EasyCC 渲染层逻辑：页签 / 主题 / 账户 / Key / 兑换 / 用量 / 公告 / 设置
-   与主进程约定见 preload.js 暴露的 window.fy；后端数据全走 window.fy.api */
+/* EasyCC v3 渲染层：BYOK 无账户版
+   页签：应用启动 / Skill 商店（免费开源目录）/ Memory / 设置·接入 */
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : "—");
 
-/* ── 全局账户状态 ── */
-let me = null; // /api/me 的 me 对象；null = 未登录
+/* ── 接入服务商预设（BYOK 模板）── */
+const PROVIDERS = {
+  deepseek: {
+    name: "DeepSeek 官方",
+    baseUrl: "https://api.deepseek.com/anthropic",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    defaultModel: "deepseek-chat",
+    help: "去 platform.deepseek.com 注册 → 充值（10 元起）→ API Keys 页创建 Key 粘到下面",
+  },
+  siliconflow: {
+    name: "硅基流动",
+    baseUrl: "https://api.siliconflow.cn",
+    models: ["deepseek-ai/DeepSeek-V3.2", "deepseek-ai/DeepSeek-V4-Flash", "Pro/deepseek-ai/DeepSeek-V3.2"],
+    defaultModel: "deepseek-ai/DeepSeek-V3.2",
+    help: "去 siliconflow.cn 注册 → API 密钥页创建 Key 粘到下面（新用户送额度）",
+  },
+  custom: {
+    name: "自定义",
+    baseUrl: "",
+    models: [],
+    defaultModel: "",
+    help: "填任意 Anthropic 协议兼容的接口地址与 Key（支持自建网关 / 其他中转服务）",
+  },
+};
 
 /* ── 页签 ── */
-const PAGES = ["launch", "account", "keys", "redeem", "usage", "skills", "memory", "notice", "settings"];
-const LOGIN_GATED = { keys: "#keysPanel", redeem: "#redeemWrap", usage: "#usageWrap" };
-
+const PAGES = ["launch", "skills", "memory", "settings"];
 let currentTab = "launch";
 
 function setTab(tab) {
   currentTab = tab;
   $$(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.tab === tab));
   for (const name of PAGES) $(`#page-${name}`).hidden = name !== tab;
-  const gate = $(`#page-${tab} [data-gate]`);
-  if (gate) {
-    gate.hidden = !!me;
-    $(LOGIN_GATED[tab]).hidden = !me;
-  }
   if (tab === "launch") refreshBinStatus();
-  if (tab === "account") renderAccount();
-  if (tab === "keys" && me) loadKeys();
-  if (tab === "redeem" && me) loadRedeem();
-  if (tab === "usage" && me) loadUsage();
   if (tab === "skills") loadSkills();
   if (tab === "memory") loadMemory();
-  if (tab === "notice") loadNotice();
   if (tab === "settings") loadSettingsForm();
 }
 
@@ -58,302 +67,25 @@ $("#themeBtn").addEventListener("click", async () => {
   await window.fy.saveConfig({ ...cfg, theme: next });
 });
 
-/* ══ 账户 ══ */
+/* ══ 网络自检（走 relay，与 CC 同路径）══ */
 
-async function refreshMe() {
-  const r = await window.fy.api("/api/me");
-  me = r.ok ? r.me : null;
-  $("#acctText").textContent = me ? me.email.split("@")[0] : "登录 / 注册";
-  $("#launchHintKey").innerHTML = me
-    ? "已登录，专属 Key 自动配好，直接点启动。"
-    : '<a class="link" data-goto="account">登录账户</a>后自动配好专属 Key，无需手动设置。';
-  return me;
+async function runNetCheck() {
+  const diag = $("#netDiag");
+  const r = await window.fy.netCheck();
+  diag.hidden = r.ok;
+  return r;
 }
-
-/** 登录后把账户的默认 Key 同步进启动配置（没有则创建） */
-async function syncKeyToConfig() {
-  const r = await window.fy.api("/api/keys", { method: "POST" });
-  if (!r.ok || !r.key) return;
-  const cfg = await window.fy.getConfig();
-  if (cfg.apiKey !== r.key.key) {
-    await window.fy.saveConfig({ ...cfg, apiKey: r.key.key });
-  }
-}
-
-function renderAccount() {
-  $("#authPanel").hidden = !!me;
-  $("#mePanel").hidden = !me;
-  if (me) {
-    $("#meEmail").textContent = me.email;
-    $("#mePoints").textContent = fmt(me.points);
-    $("#meCreated").textContent = (me.createdAt || "").slice(0, 10);
-  }
-}
-
-let authMode = "login";
-function setAuthMode(mode) {
-  authMode = mode;
-  $("#segLogin").classList.toggle("active", mode === "login");
-  $("#segRegister").classList.toggle("active", mode === "register");
-  $("#authConfirmWrap").hidden = mode === "login";
-  $("#authBtn").textContent = mode === "login" ? "登 录" : "注 册";
-  $("#authMsg").textContent = " ";
-  $("#authMsg").className = "field-help";
-}
-$("#segLogin").addEventListener("click", () => setAuthMode("login"));
-$("#segRegister").addEventListener("click", () => setAuthMode("register"));
-
-$("#authBtn").addEventListener("click", async () => {
-  const email = $("#authEmail").value.trim();
-  const password = $("#authPassword").value;
-  const msg = $("#authMsg");
-  msg.className = "field-help";
-  if (!email || !password) return (msg.textContent = "邮箱和密码都要填");
-  if (authMode === "register" && password !== $("#authPassword2").value) {
-    msg.className = "field-help err";
-    return (msg.textContent = "两次密码不一致");
-  }
-  $("#authBtn").disabled = true;
-  msg.textContent = "请稍候…";
-  try {
-    const r = await window.fy.api(`/api/auth/${authMode}`, {
-      method: "POST",
-      body: { email, password },
-    });
-    if (!r.ok) {
-      msg.className = "field-help err";
-      msg.textContent = r.error || "失败了，稍后再试";
-      return;
-    }
-    await refreshMe();
-    await syncKeyToConfig();
-    msg.className = "field-help ok";
-    msg.textContent = "✓ 成功，专属 Key 已自动配好";
-    renderAccount();
-    setTimeout(() => setTab("launch"), 900);
-  } finally {
-    $("#authBtn").disabled = false;
-  }
+$("#diagRetryBtn").addEventListener("click", async () => {
+  const st = $("#diagStatus");
+  st.textContent = "检测中…";
+  const r = await runNetCheck();
+  st.textContent = r.ok ? "" : `仍被拦截（${r.error}），按上面办法处理后再试`;
 });
-
-$("#logoutBtn").addEventListener("click", async () => {
-  await window.fy.api("/api/auth/logout", { method: "POST" });
-  me = null;
-  await refreshMe();
-  renderAccount();
-});
-
-/* ══ 我的 Key ══ */
-
-function maskKey(k) {
-  return k.length > 10 ? `${k.slice(0, 4)}······${k.slice(-6)}` : k;
-}
-
-async function loadKeys() {
-  const list = $("#keyList");
-  list.innerHTML = '<p class="field-help">加载中…</p>';
-  const r = await window.fy.api("/api/keys");
-  if (!r.ok) return (list.innerHTML = `<p class="field-help err">${r.error}</p>`);
-  if (!r.keys.length) {
-    list.innerHTML = "";
-    const btn = document.createElement("button");
-    btn.className = "btn";
-    btn.textContent = "创建我的专属 Key";
-    btn.addEventListener("click", async () => {
-      await window.fy.api("/api/keys", { method: "POST" });
-      await syncKeyToConfig();
-      loadKeys();
-    });
-    list.appendChild(btn);
-    return;
-  }
-  list.innerHTML = "";
-  for (const k of r.keys) {
-    const row = document.createElement("div");
-    row.className = "key-row";
-    const active = k.status === "ACTIVE";
-    row.innerHTML = `
-      <div class="key-main">
-        <span class="mono key-text">${maskKey(k.key)}</span>
-        <span class="chip ${active ? "on" : ""}">${active ? "启用中" : "已停用"}</span>
-      </div>
-      <div class="key-actions">
-        <button class="btn btn-ghost" data-act="copy">复制</button>
-        <button class="btn btn-ghost" data-act="use">用于启动</button>
-        <button class="btn btn-ghost" data-act="toggle">${active ? "停用" : "启用"}</button>
-        <button class="btn btn-ghost" data-act="reset">重置</button>
-      </div>`;
-    row.addEventListener("click", async (e) => {
-      const act = e.target.closest("[data-act]")?.dataset.act;
-      if (!act) return;
-      const msg = $("#keysMsg");
-      msg.className = "field-help";
-      if (act === "copy") {
-        await navigator.clipboard.writeText(k.key);
-        msg.className = "field-help ok";
-        msg.textContent = "✓ 已复制完整 Key";
-      } else if (act === "use") {
-        const cfg = await window.fy.getConfig();
-        await window.fy.saveConfig({ ...cfg, apiKey: k.key });
-        msg.className = "field-help ok";
-        msg.textContent = "✓ 已写入启动配置";
-      } else if (act === "toggle") {
-        const r2 = await window.fy.api("/api/keys/toggle", {
-          method: "POST",
-          body: { keyId: k.id, enable: !active },
-        });
-        msg.className = r2.ok ? "field-help ok" : "field-help err";
-        msg.textContent = r2.ok ? `✓ ${r2.message}` : r2.error;
-        loadKeys();
-      } else if (act === "reset") {
-        const r2 = await window.fy.api("/api/keys/reset", {
-          method: "POST",
-          body: { keyId: k.id },
-        });
-        msg.className = r2.ok ? "field-help ok" : "field-help err";
-        msg.textContent = r2.ok ? `✓ ${r2.message}` : r2.error;
-        if (r2.ok) await syncKeyToConfig();
-        loadKeys();
-      }
-    });
-    list.appendChild(row);
-  }
-}
-
-/* ══ 积分 · 兑换 ══ */
-
-async function loadRedeem() {
-  await refreshMe();
-  if (!me) return;
-  $("#pointsNum").textContent = fmt(me.points);
-  $("#rateText").textContent = `1 积分 = ${fmt(me.exchangeQuotaPerPoint)} 额度`;
-  updateExchangePreview();
-}
-
-function updateExchangePreview() {
-  const n = parseInt($("#exchangeInput").value, 10);
-  const el = $("#exchangePreview");
-  if (me && n > 0) {
-    el.textContent = `将得到 ${fmt(n * me.exchangeQuotaPerPoint)} 额度`;
-  } else {
-    el.textContent = " ";
-  }
-}
-$("#exchangeInput").addEventListener("input", updateExchangePreview);
-
-$("#activateBtn").addEventListener("click", async () => {
-  const code = $("#codeInput").value.trim();
-  const msg = $("#activateMsg");
-  msg.className = "field-help";
-  if (!code) return (msg.textContent = "先粘贴激活码");
-  $("#activateBtn").disabled = true;
-  msg.textContent = "激活中…";
-  try {
-    const r = await window.fy.api("/api/activate", { method: "POST", body: { code } });
-    msg.className = r.ok ? "field-help ok" : "field-help err";
-    msg.textContent = r.ok ? `✓ ${r.message}` : r.error;
-    if (r.ok) {
-      $("#codeInput").value = "";
-      loadRedeem();
-    }
-  } finally {
-    $("#activateBtn").disabled = false;
-  }
-});
-
-$("#exchangeBtn").addEventListener("click", async () => {
-  const points = parseInt($("#exchangeInput").value, 10);
-  const msg = $("#exchangeMsg");
-  msg.className = "field-help";
-  if (!points || points < 1) return (msg.textContent = "输入要兑换的积分数（正整数）");
-  $("#exchangeBtn").disabled = true;
-  msg.textContent = "兑换中…";
-  try {
-    const r = await window.fy.api("/api/exchange", { method: "POST", body: { points } });
-    msg.className = r.ok ? "field-help ok" : "field-help err";
-    msg.textContent = r.ok ? `✓ ${r.message}` : r.error;
-    if (r.ok) {
-      $("#exchangeInput").value = "";
-      loadRedeem();
-    }
-  } finally {
-    $("#exchangeBtn").disabled = false;
-  }
-});
-
-/* ══ 用量统计 ══ */
-
-async function loadUsage() {
-  const msg = $("#usageMsg");
-  msg.textContent = "加载中…";
-  const r = await window.fy.api("/api/usage?days=30");
-  if (!r.ok) return (msg.textContent = r.error);
-  if (!r.hasKey) {
-    $("#remainNum").textContent = $("#usedNum").textContent = $("#reqNum").textContent = "—";
-    $("#dailyChart").innerHTML = "";
-    msg.textContent = "还没有 Key，先去「我的 Key」创建一个";
-    return;
-  }
-  $("#remainNum").textContent = fmt(r.usage?.remain);
-  $("#usedNum").textContent = fmt(r.usage?.used);
-  $("#reqNum").textContent = fmt(r.daily.reduce((s, d) => s + d.requests, 0));
-
-  // 纯 CSS 柱状图：30 天补齐，无数据的天画 0 高度
-  const byDay = Object.fromEntries(r.daily.map((d) => [d.day, d]));
-  const days = [];
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 86400_000).toISOString().slice(0, 10);
-    days.push({ day: d, quotaUsed: byDay[d]?.quotaUsed || 0 });
-  }
-  const max = Math.max(1, ...days.map((d) => d.quotaUsed));
-  const chart = $("#dailyChart");
-  chart.innerHTML = "";
-  for (const d of days) {
-    const bar = document.createElement("div");
-    bar.className = "chart-bar";
-    bar.style.height = `${Math.round((d.quotaUsed / max) * 100)}%`;
-    bar.title = `${d.day}：${fmt(d.quotaUsed)} 额度`;
-    chart.appendChild(bar);
-  }
-  msg.textContent = " ";
-}
-
-/* ══ 公告 ══ */
-
-async function loadNotice() {
-  const wrap = $("#noticeWrap");
-  const r = await window.fy.api("/api/announcements");
-  if (!r.ok) {
-    wrap.innerHTML = `<p class="field-help err">${r.error}</p>`;
-    return;
-  }
-  wrap.innerHTML = "";
-  if (r.notice) {
-    const el = document.createElement("div");
-    el.className = "notice-item pinned";
-    el.innerHTML = `<div class="notice-title">📌 置顶</div><div class="notice-body"></div>`;
-    el.querySelector(".notice-body").textContent = r.notice;
-    wrap.appendChild(el);
-  }
-  for (const it of r.items) {
-    const el = document.createElement("div");
-    el.className = "notice-item";
-    el.innerHTML = `<div class="notice-title"></div><div class="notice-date"></div><div class="notice-body"></div>`;
-    el.querySelector(".notice-title").textContent = it.title || "公告";
-    el.querySelector(".notice-date").textContent = it.date || "";
-    el.querySelector(".notice-body").textContent = it.content || "";
-    wrap.appendChild(el);
-  }
-  if (!r.notice && !r.items.length) {
-    wrap.innerHTML = '<p class="field-help">暂无公告</p>';
-  }
-}
 
 /* ══ 应用启动 ══ */
 
 async function refreshBinStatus() {
   const st = await window.fy.binStatus();
-  // 仅 CC；Codex 暂下架（新版 responses 协议与国产网关不兼容），状态固定文案由 HTML 写死
   const el = $("#status-cc");
   if (el) {
     if (st.cc.ready) {
@@ -374,7 +106,7 @@ $$("[data-launch]").forEach((btn) =>
       const r = await window.fy.launch(btn.dataset.launch);
       if (!r.ok) {
         await window.fy.msgbox(r.error);
-        setTab(me ? "settings" : "account");
+        setTab("settings");
       }
     } finally {
       btn.disabled = false;
@@ -407,96 +139,17 @@ window.fy.onProgress((p) => {
   }
 });
 
-/* ══ 设置 ══ */
-
-async function loadSettingsForm() {
-  const cfg = await window.fy.getConfig();
-  $("#apiKey").value = cfg.apiKey || "";
-  $("#saveMsg").textContent = "";
-  checkConn();
-}
-
-/** 连接状态检测：走 relay（与 CC 完全同一条链路），不再用主进程直连误导 */
-async function checkConn() {
-  const el = $("#connStatus");
-  el.className = "field-help";
-  el.textContent = "检测中…";
-  const r = await window.fy.netCheck();
-  if (r.ok) {
-    el.className = "field-help ok";
-    el.textContent = `✓ 连接正常 · 延迟 ${r.ms}ms（与 Claude Code 同链路实测）`;
-  } else {
-    el.className = "field-help err";
-    el.textContent = `✗ 连接异常：${r.error} —— 若开着 VPN 请彻底退出后重试`;
-  }
-}
-$("#connBtn").addEventListener("click", checkConn);
-
-$("#eyeBtn").addEventListener("click", () => {
-  const input = $("#apiKey");
-  const hide = input.type === "password";
-  input.type = hide ? "text" : "password";
-  $("#eyeBtn").textContent = hide ? "隐藏" : "显示";
-});
-
-$("#saveBtn").addEventListener("click", async () => {
-  const cfg = await window.fy.getConfig();
-  await window.fy.saveConfig({
-    ...cfg,
-    apiKey: $("#apiKey").value.trim(),
-  });
-  $("#saveMsg").textContent = "✓ 已保存";
-  setTimeout(() => ($("#saveMsg").textContent = ""), 2000);
-});
-
-/* ══ 模型广场：选中即保存，CC 下次启动生效 ══ */
-
-async function initModelChips() {
-  const cfg = await window.fy.getConfig();
-  const cur = cfg.model || "claude-sonnet-4-5";
-  $$(".model-chip").forEach((c) => {
-    c.classList.toggle("active", c.dataset.model === cur);
-    c.addEventListener("click", async () => {
-      $$(".model-chip").forEach((x) => x.classList.remove("active"));
-      c.classList.add("active");
-      const latest = await window.fy.getConfig();
-      await window.fy.saveConfig({ ...latest, model: c.dataset.model });
-    });
-  });
-}
-
-/* ══ 网络自检（走 relay，与 CC 同路径）══ */
-
-async function runNetCheck() {
-  const diag = $("#netDiag");
-  const r = await window.fy.netCheck();
-  diag.hidden = r.ok;
-  return r;
-}
-$("#diagRetryBtn").addEventListener("click", async () => {
-  const st = $("#diagStatus");
-  st.textContent = "检测中…";
-  const r = await runNetCheck();
-  st.textContent = r.ok ? "" : `仍被拦截（${r.error}），按上面办法处理后再试`;
-});
-$("#diagCopyBtn").addEventListener("click", async () => {
-  await navigator.clipboard.writeText(
-    "- DOMAIN-SUFFIX,dufengyun.xyz,DIRECT\n- IP-CIDR,115.29.233.78/32,DIRECT,no-resolve\n# fake-ip-filter 加：\n- +.dufengyun.xyz"
-  );
-  $("#diagStatus").textContent = "✓ 已复制";
-});
-
-/* ══ Skill 商店 ══ */
+/* ══ Skill 商店（免费开源目录）══ */
 
 let installedSkills = [];
 
 async function loadSkills() {
   const list = $("#skillList");
   list.innerHTML = '<p class="field-help">加载中…</p>';
-  const [r, installed] = await Promise.all([window.fy.api("/api/skills"), window.fy.skillInstalled()]);
+  const [r, installed] = await Promise.all([window.fy.skillList(), window.fy.skillInstalled()]);
   installedSkills = installed;
-  if (!r.ok) return (list.innerHTML = `<p class="field-help err">${r.error}</p>`);
-  if (!r.skills.length) return (list.innerHTML = '<p class="field-help">商店暂时没有上架 Skill，敬请期待</p>');
+  if (!r.ok) return (list.innerHTML = `<p class="field-help err">${esc(r.error)}</p>`);
+  if (!r.skills.length) return (list.innerHTML = '<p class="field-help">目录暂时为空</p>');
   list.innerHTML = "";
   for (const s of r.skills) list.appendChild(skillCard(s));
 }
@@ -505,44 +158,22 @@ function skillCard(s) {
   const el = document.createElement("div");
   el.className = "tool-card skill-card";
   const isInstalled = installedSkills.includes(s.slug);
-  const free = s.pricePoints === 0;
   el.innerHTML = `
     <div class="skill-head">
       <div class="tool-name">${esc(s.title)}</div>
-      <span class="chip ${s.owned || free ? "on" : ""}">${free ? "限时免费" : s.owned ? "已购" : fmt(s.pricePoints) + " 积分"}</span>
+      <span class="chip on">免费</span>
     </div>
-    <div class="tool-desc">${esc(s.subtitle || s.desc.slice(0, 80))}</div>
+    <div class="tool-desc">${esc(s.subtitle || "")}</div>
     <div class="tool-status">${s.version ? "v" + esc(s.version) + " · " : ""}${isInstalled ? "✓ 已安装（重启 CC 生效）" : "未安装"}</div>
-    <button class="btn btn-launch"></button>`;
+    <button class="btn btn-launch">${isInstalled ? "重新安装" : "安装到本地"}</button>`;
   const btn = el.querySelector("button");
-  const setBtn = () => {
-    const owned = s.owned || free;
-    btn.textContent = isInstalled ? "重新安装" : owned ? "安装到本地" : `${fmt(s.pricePoints)} 积分购买`;
-  };
-  setBtn();
   btn.addEventListener("click", async () => {
     const msg = $("#skillMsg");
     msg.className = "field-help";
-    if (!me) {
-      msg.textContent = "先登录账户再购买/安装";
-      return setTab("account");
-    }
     btn.disabled = true;
+    msg.textContent = "下载安装中…";
     try {
-      if (!s.owned && !free) {
-        msg.textContent = "购买中…";
-        const buy = await window.fy.api("/api/orders", { method: "POST", body: { productId: s.id } });
-        if (!buy.ok) {
-          msg.className = "field-help err";
-          msg.textContent = buy.error;
-          return;
-        }
-        s.owned = true;
-        msg.className = "field-help ok";
-        msg.textContent = `✓ ${buy.message}`;
-      }
-      msg.textContent = "下载安装中…";
-      const inst = await window.fy.skillInstall(s.slug, free && !s.owned ? "lite" : "pro");
+      const inst = await window.fy.skillInstall(s.slug, s.file);
       if (!inst.ok) {
         msg.className = "field-help err";
         msg.textContent = inst.error;
@@ -553,7 +184,6 @@ function skillCard(s) {
       loadSkills();
     } finally {
       btn.disabled = false;
-      setBtn();
     }
   });
   return el;
@@ -602,7 +232,7 @@ function mdRender(md) {
   }
   closeList();
   if (inCode) html += "</code></pre>";
-  return html || '<p class="field-help">还没有全局 Memory。点「编辑」写下你希望 Claude Code 一直记住的偏好和约定，或在 CC 对话里以 # 开头发消息让它自己记。</p>';
+  return html;
 }
 
 async function loadMemory() {
@@ -646,15 +276,96 @@ $("#memSaveBtn").addEventListener("click", async () => {
   setTimeout(() => (msg.textContent = " "), 2500);
 });
 
+/* ══ 设置 · 接入（BYOK）══ */
+
+let curProvider = "deepseek";
+
+function applyProviderUI(provider, cfg = {}) {
+  curProvider = provider;
+  const p = PROVIDERS[provider];
+  $$(".model-chip[data-provider]").forEach((c) =>
+    c.classList.toggle("active", c.dataset.provider === provider)
+  );
+  $("#providerHelp").textContent = p.help;
+  $("#customFields").hidden = provider !== "custom";
+  if (provider === "custom") {
+    $("#baseUrl").value = cfg.baseUrl && cfg.provider === "custom" ? cfg.baseUrl : "";
+  }
+  // 模型候选
+  const dl = $("#modelOptions");
+  dl.innerHTML = p.models.map((m) => `<option value="${esc(m)}">`).join("");
+  const useSaved = cfg.provider === provider;
+  $("#modelInput").value = useSaved && cfg.model ? cfg.model : p.defaultModel;
+  $("#smallModelInput").value = useSaved && cfg.smallModel && cfg.smallModel !== cfg.model ? cfg.smallModel : "";
+}
+
+$$(".model-chip[data-provider]").forEach((c) =>
+  c.addEventListener("click", async () => {
+    const cfg = await window.fy.getConfig();
+    applyProviderUI(c.dataset.provider, cfg);
+  })
+);
+
+async function loadSettingsForm() {
+  const cfg = await window.fy.getConfig();
+  applyProviderUI(cfg.provider || "deepseek", cfg);
+  $("#apiKey").value = cfg.apiKey || "";
+  $("#saveMsg").textContent = "";
+  if (cfg.apiKey) checkConn();
+}
+
+$("#eyeBtn").addEventListener("click", () => {
+  const input = $("#apiKey");
+  const hide = input.type === "password";
+  input.type = hide ? "text" : "password";
+  $("#eyeBtn").textContent = hide ? "隐藏" : "显示";
+});
+
+$("#saveBtn").addEventListener("click", async () => {
+  const p = PROVIDERS[curProvider];
+  const model = $("#modelInput").value.trim() || p.defaultModel || "deepseek-chat";
+  const small = $("#smallModelInput").value.trim() || model;
+  const baseUrl = curProvider === "custom" ? $("#baseUrl").value.trim().replace(/\/+$/, "") : p.baseUrl;
+  const msg = $("#saveMsg");
+  if (!baseUrl) {
+    msg.textContent = "接口地址不能为空";
+    return;
+  }
+  const cfg = await window.fy.getConfig();
+  await window.fy.saveConfig({
+    ...cfg,
+    provider: curProvider,
+    baseUrl,
+    apiKey: $("#apiKey").value.trim(),
+    model,
+    smallModel: small,
+  });
+  msg.textContent = "✓ 已保存";
+  setTimeout(() => (msg.textContent = ""), 2000);
+  setTimeout(checkConn, 800); // relay 重启后再测
+});
+
+/** 连接检测：走 relay（与 CC 完全同一条链路） */
+async function checkConn() {
+  const el = $("#connStatus");
+  el.className = "field-help";
+  el.textContent = "检测中…";
+  const r = await window.fy.netCheck();
+  if (r.ok) {
+    el.className = "field-help ok";
+    el.textContent = `✓ 连接正常 · 延迟 ${r.ms}ms（与 Claude Code 同链路实测）`;
+  } else {
+    el.className = "field-help err";
+    el.textContent = `✗ 连接异常：${r.error} —— 若开着 VPN 请彻底退出或给服务商域名加直连规则`;
+  }
+}
+$("#connBtn").addEventListener("click", checkConn);
+
 /* ── 启动初始化 ── */
 (async () => {
   const cfg = await window.fy.getConfig();
   applyTheme(cfg.theme === "dark" ? "dark" : "light");
   $("#verText").textContent = "v" + (await window.fy.version());
   refreshBinStatus();
-  initModelChips();
-  setTimeout(runNetCheck, 2500); // 等 relay 起来后自检网络，被 VPN 拦截时给诊断卡
-  await refreshMe();
-  if (me) syncKeyToConfig(); // 登录态下每次开 App 校准一次启动 Key
-  setTab(currentTab); // 登录态确定后重放当前页签，消掉「抢先点开门禁页」的竞态
+  setTimeout(runNetCheck, 2500); // 等 relay 起来后自检网络
 })();
