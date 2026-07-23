@@ -1,11 +1,16 @@
-# macOS 安装包（dmg）只能在 macOS 上打：electron-builder 的 mac 目标依赖 hdiutil。
-# 本地 Windows 打不了 → 用 GitHub Actions 的 macos 跑机。手动触发或打 v* tag 触发。
-name: build-mac
+# 发布流水线：mac dmg ×2 + Windows exe 全在 CI 打，产物直接挂 GitHub Release。
+# mac 的 CLI 运行时二进制（claude-darwin-* / codex-darwin-*）也由 CI 抓官方源重打包，
+# 传到 tag=binaries 的 release（App 内 BIN_SOURCES 的 GitHub 兜底源）。
+# 手动触发或打 v* tag 触发。本地 Windows 打不了 mac 包（electron-builder mac 目标依赖 hdiutil）。
+name: release-build
 
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: write
 
 jobs:
   dmg:
@@ -39,7 +44,81 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          gh release create "$TAG" --title "EasyCC $TAG" --notes "Windows + macOS 安装包（CI 自动构建）" 2>/dev/null || true
+          gh release upload "$TAG" dist/*.dmg --clobber
+
       - uses: actions/upload-artifact@v4
         with:
           name: EasyCC-mac-${{ matrix.arch }}
           path: dist/*.dmg
+
+  win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # vendor-node/ 不进 git（.gitignore），CI 现场从 nodejs.org 下官方 node.exe
+      - name: Prepare bundled relay node.exe
+        shell: bash
+        run: |
+          mkdir -p vendor-node
+          curl -fsSL "https://nodejs.org/dist/v22.12.0/win-x64/node.exe" -o vendor-node/node.exe
+
+      - run: npm ci
+
+      - name: Build nsis installer
+        run: npx electron-builder --win nsis --publish never
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          gh release create "$TAG" --title "EasyCC $TAG" --notes "Windows + macOS 安装包（CI 自动构建）" 2>/dev/null || true
+          gh release upload "$TAG" dist/EasyCC-Setup-*.exe --clobber
+
+  # App 启动时按需下载的 CLI 运行时（mac 版）：抓官方源 → 重打包成 App 预期的结构 → 挂 binaries release
+  cli-mac-binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Claude Code darwin binaries (official)
+        run: |
+          VER=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest)
+          echo "Claude Code version: $VER"
+          MANIFEST=$(curl -fsSL "https://downloads.claude.ai/claude-code-releases/$VER/manifest.json")
+          for p in darwin-arm64 darwin-x64; do
+            curl -fsSL "https://downloads.claude.ai/claude-code-releases/$VER/$p/claude" -o "claude-$p"
+            WANT=$(echo "$MANIFEST" | jq -r ".platforms[\"$p\"].checksum")
+            GOT=$(sha256sum "claude-$p" | cut -d' ' -f1)
+            [ "$WANT" = "$GOT" ] || { echo "checksum mismatch for $p"; exit 1; }
+          done
+
+      # App 解压预期 bin/codex（见 main.js ensureBinary），官方 tar 里是单文件 → 重打包
+      - name: Fetch & repack codex darwin tarballs (official)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for pair in "aarch64:arm64" "x86_64:x64"; do
+            src="codex-${pair%%:*}-apple-darwin"; dst="codex-darwin-${pair##*:}"
+            gh release download --repo openai/codex --pattern "$src.tar.gz" -O "$src.tar.gz"
+            rm -rf repack && mkdir -p repack/bin
+            tar -xzf "$src.tar.gz" -C repack
+            mv "repack/$src" repack/bin/codex && chmod +x repack/bin/codex
+            tar -czf "$dst.tar.gz" -C repack bin/codex
+          done
+
+      - name: Upload to binaries release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload binaries claude-darwin-arm64 claude-darwin-x64 codex-darwin-arm64.tar.gz codex-darwin-x64.tar.gz --clobber -R "$GITHUB_REPOSITORY"
